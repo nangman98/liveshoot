@@ -41,6 +41,6 @@
 
 ## Still open
 
-- **소니 기종**: Creators' App의 촬영 중 전송은 FX3, α7R V, α1 등 정해진 기종만 됨(2.5.0, 2024-09, [Sony](https://creatorscloud.sony.net/news/en-us/20240912.html)). 쓰는 기종이 목록에 있는지 확인해야 함
+- **소니 a7 IV**: Creators' App의 촬영 중 전송 기종 목록(2.5.0, 2024-09, [Sony](https://creatorscloud.sony.net/news/en-us/20240912.html))에서 a7 IV를 확인하지 못함. a7 IV에는 찍을 때마다 FTP 서버로 보내는 background FTP transfer가 있어([Sony](https://www.sony.ca/en/interchangeable-lens-cameras/products/ilce-7m4/feature5)) 2판에서 앱 안에 FTP 받기를 넣을 계획임
 - **리코 GR III**: GR WORLD가 카메라 안 사진을 무선으로 가져오는 것은 확인했지만 찍는 즉시 자동 전송하는지는 확인 못 함([Ricoh](https://www.ricoh-imaging.co.jp/english/products/app/gr-world/)). 안 되면 사진을 골라 보내는 방식이 됨
 - **PhotoKit in Playgrounds**: Swift Playgrounds에서 사진 보관함 권한(`.photoLibrary`)이 실제로 붙는지는 iPad에서 빌드해야 확인됨
