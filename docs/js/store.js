@@ -43,6 +43,7 @@ export const store = {
 
 export const defaults = () => ({
   autoExposure: true,
+  geometry: { rotate: 0, flip: false, angle: 0, crop: null, aspect: 'original' },
   light: { exposure: 0, contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0 },
   curve: { rgb: [[0, 0], [1, 1]], r: [[0, 0], [1, 1]], g: [[0, 0], [1, 1]], b: [[0, 0], [1, 1]], refineSat: 100 },
   color: { temp: 0, tint: 0, vibrance: 0, saturation: 0 },

@@ -1,7 +1,7 @@
 // 오프라인 캐시. 고친 뒤 VERSION을 올리면 기기에서 다음에 열 때 새 판으로 바뀐다 (js/main.js의 VERSION과 같게).
-const VERSION = 'v2';
+const VERSION = 'v4';
 const CACHE = 'liveshoot-' + VERSION;
-const FILES = ['./', 'index.html', 'app.css', 'manifest.webmanifest', 'js/main.js', 'js/gl.js', 'js/store.js', 'js/curve.js', 'js/export.js',
+const FILES = ['./', 'index.html', 'app.css', 'manifest.webmanifest', 'js/main.js', 'js/gl.js', 'js/store.js', 'js/curve.js', 'js/export.js', 'js/geometry.js', 'js/exif.js',
   'icons/icon.svg', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {

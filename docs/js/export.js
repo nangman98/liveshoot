@@ -1,4 +1,6 @@
 // 내보내기: 원본에서 다시 그려 JPEG로 만들고, 공유 시트·다운로드·Google Drive 폴더로 보낸다.
+import { renderGeometry } from './geometry.js';
+import { readExif, prepare, insertExif } from './exif.js';
 
 export const MAX_AREA = 16_000_000;   // iPad Safari 캔버스 면적 한도(약 16.7 MP) 안쪽
 
@@ -24,17 +26,19 @@ export function toCanvas(src, maxEdge) {
   return c;
 }
 
-/** 원본 → 보정 → JPEG File. edge 0이면 원본 크기(면적·텍스처 한도 안에서) */
-export async function renderJPEG(pipe, meta, blob, edge, quality) {
+/**
+ * 원본 → 자르기·회전 → 보정 → JPEG File. edge 0이면 원본 크기(면적·텍스처 한도 안에서).
+ * 원본 JPEG의 EXIF(날짜·카메라, keepGPS면 위치까지)를 다시 넣는다.
+ */
+export async function renderJPEG(pipe, meta, blob, edge, quality, keepGPS = true) {
   const img = await loadImage(blob);
-  const w0 = img.naturalWidth, h0 = img.naturalHeight, nat = Math.max(w0, h0);
-  let long = edge ? Math.min(edge, nat) : nat;
-  long = Math.min(long, pipe.maxTex, Math.floor(nat * Math.sqrt(MAX_AREA / (w0 * h0))));
-  const c = toCanvas(img, long);
+  const c = renderGeometry(img, meta.settings.geometry, Math.min(edge || Infinity, pipe.maxTex), { maxArea: MAX_AREA });
   const out = pipe.renderFull(c, c.width, c.height, meta.settings, meta.autoEV);
-  const jpg = await new Promise((r) => out.toBlob(r, 'image/jpeg', quality / 100));
+  let jpg = await new Promise((r) => out.toBlob(r, 'image/jpeg', quality / 100));
+  const ex = await readExif(blob);
+  if (ex) jpg = await insertExif(jpg, prepare(ex.seg, keepGPS));
   const stem = meta.name.replace(/\.[^.]+$/, '');
-  return { file: new File([jpg], `${stem}_edit.jpg`, { type: 'image/jpeg' }), w: c.width, h: c.height };
+  return { file: new File([jpg], `${stem}_edit.jpg`, { type: 'image/jpeg' }), w: c.width, h: c.height, exif: !!ex };
 }
 
 export function download(files) {

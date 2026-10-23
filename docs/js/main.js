@@ -1,10 +1,13 @@
 import { Pipeline } from './gl.js';
 import { store, defaults, withDefaults, clone } from './store.js';
 import { CurveEditor } from './curve.js';
+import { renderGeometry, frameSize, aspectRatio, maxCrop, CropBox, ASPECTS } from './geometry.js';
+import { readExif } from './exif.js';
 import { loadImage, toCanvas, renderJPEG, download, canShareFiles, driveConfig, saveDriveConfig, driveToken, pickDriveFolder, uploadToDrive } from './export.js';
 
-export const VERSION = 'v2';
+export const VERSION = 'v4';
 const PREVIEW = 2048;   // 화면용 긴 변 (px)
+const BASE = 3072;      // 자르기·회전 전에 읽어 두는 원본 (긴 변 px)
 
 const $ = (s, r = document) => r.querySelector(s);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -17,6 +20,8 @@ const app = {
   follow: true, carry: localStorage.getItem('ls.carry') === '1',
   exportEdge: +(localStorage.getItem('ls.edge') || 2400), quality: +(localStorage.getItem('ls.q') || 85),
   dest: localStorage.getItem('ls.dest') || 'share',
+  keepGPS: localStorage.getItem('ls.gps') !== '0',
+  base: null, cropping: false, geomKey: '', cropBox: null,
 };
 
 // ---------- 공통 ----------
@@ -36,7 +41,9 @@ function toast(msg, action) {
 
 function startSettings() {
   const d = localStorage.getItem('ls.default');
-  return d ? withDefaults(JSON.parse(d)) : defaults();
+  const st = d ? withDefaults(JSON.parse(d)) : defaults();
+  st.geometry = defaults().geometry;   // 자르기·회전은 사진마다
+  return st;
 }
 
 /** 64 px로 줄인 그림의 log 평균 휘도를 중간 회색(선형 0.18)에 맞추는 EV, ±2.5 */
@@ -52,13 +59,52 @@ function autoEV(canvas) {
 }
 
 let saveTimer;
-function changed() {
+function changed(record = true) {
   scheduleRender();
   if (!app.cur) return;
   app.cur.exported = false;
   clearTimeout(saveTimer);
   const m = app.cur;
   saveTimer = setTimeout(() => store.putMeta(m), 400);
+  if (record) scheduleRecord(m);
+}
+
+// ---------- 되돌리기·다시 하기 (사진마다, 슬라이더를 움직이다 멈춘 때를 한 단계로) ----------
+
+const histories = new Map();
+let histTimer;
+function hist(m) {
+  if (!histories.has(m.id)) histories.set(m.id, { undo: [], redo: [], last: JSON.stringify(m.settings) });
+  return histories.get(m.id);
+}
+function scheduleRecord(m) { clearTimeout(histTimer); histTimer = setTimeout(() => recordHistory(m), 350); }
+function recordHistory(m) {
+  const h = hist(m), now = JSON.stringify(m.settings);
+  if (now === h.last) return;
+  h.undo.push(h.last);
+  if (h.undo.length > 200) h.undo.shift();
+  h.redo = [];
+  h.last = now;
+  updateUndoButtons();
+}
+function stepHistory(back) {
+  if (!app.cur) return;
+  clearTimeout(histTimer);
+  recordHistory(app.cur);   // 아직 기록 안 된 마지막 움직임부터 기록
+  const h = hist(app.cur), from = back ? h.undo : h.redo, to = back ? h.redo : h.undo;
+  if (!from.length) return;
+  to.push(h.last);
+  h.last = from.pop();
+  app.cur.settings = JSON.parse(h.last);
+  syncAll();
+  changed(false);
+  if (app.cropping) showCropBox();
+  updateUndoButtons();
+}
+function updateUndoButtons() {
+  const h = app.cur && hist(app.cur);
+  $('#undoBtn').disabled = !h || !h.undo.length;
+  $('#redoBtn').disabled = !h || !h.redo.length;
 }
 
 let raf = 0, histT = 0;
@@ -67,6 +113,7 @@ function scheduleRender() {
   raf = requestAnimationFrame(() => {
     raf = 0;
     if (!app.cur || !app.preview) return;
+    if (geomKey() !== app.geomKey) refreshPreview();
     app.pipe.draw(app.cur.settings, app.cur.autoEV, app.original);
     const now = performance.now();
     if (now - histT > 180) { histT = now; drawHist(app.pipe.histogram()); }
@@ -97,12 +144,15 @@ async function importFiles(files) {
   for (const f of files) {
     try {
       const img = await loadImage(f);
-      const c = toCanvas(img, PREVIEW);
+      const c = toCanvas(img, BASE);
       const thumb = await new Promise((r) => toCanvas(c, 240).toBlob(r, 'image/jpeg', 0.8));
       const settings = app.carry && app.cur ? clone(app.cur.settings) : startSettings();
+      settings.geometry = defaults().geometry;
+      const ex = await readExif(f);
       const meta = {
         id: crypto.randomUUID(), name: f.name || `photo_${Date.now()}.jpg`, added: Date.now(),
         w: img.naturalWidth, h: img.naturalHeight, autoEV: autoEV(c), settings, liked: false, exported: false, thumb,
+        exif: ex ? ex.info : null,
       };
       await store.putBlob(meta.id, f);
       await store.putMeta(meta);
@@ -125,16 +175,67 @@ async function select(id, ready) {
   let c = ready;
   if (!c) {
     const blob = await store.getBlob(id);
-    c = toCanvas(await loadImage(blob), PREVIEW);
+    c = toCanvas(await loadImage(blob), BASE);
   }
-  app.preview = c;
-  app.pipe.setPreview(c, c.width, c.height, m.settings.detail.sharpen.radius);
+  app.base = c;
+  if (app.cropping) toggleCrop(false);
+  app.geomKey = '';
+  hist(m);   // 이 사진의 기록 시작점
+  updateUndoButtons();
+  refreshPreview();
   document.body.classList.add('has-photo');
   syncAll();
   scheduleRender();
   renderStrip();
-  $('#photoName').textContent = `${m.name} · ${m.w}×${m.h}`;
+  const e = m.exif || {};
+  $('#photoName').textContent = [m.name, `${m.w}×${m.h}`, e.date ? e.date.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3') : '날짜 정보 없음',
+    e.gps ? `위치 ${e.gps.lat.toFixed(4)}, ${e.gps.lon.toFixed(4)}` : '위치 정보 없음', e.model].filter(Boolean).join(' · ');
   $('#heart').textContent = m.liked ? '♥' : '♡';
+}
+
+/** 자르기 편집 중에는 자르기 전 틀 전체를 보여 준다 */
+function geomKey() {
+  const g = { ...app.cur.settings.geometry };
+  if (app.cropping) delete g.crop;
+  return JSON.stringify(g) + (app.cropping ? '|crop' : '') + (app.cur.id);
+}
+
+function refreshPreview() {
+  const m = app.cur, g = m.settings.geometry;
+  const was = app.geomKey;
+  app.preview = renderGeometry(app.base, g, PREVIEW, { ignoreCrop: app.cropping });
+  app.pipe.setPreview(app.preview, app.preview.width, app.preview.height, m.settings.detail.sharpen.radius);
+  app.geomKey = geomKey();
+  if (app.cropping) requestAnimationFrame(() => showCropBox());
+  else if (was && was !== app.geomKey && was.endsWith(m.id)) updateThumb(m);   // 같은 사진에서 기하가 바뀌면 썸네일도
+}
+
+function updateThumb(m) {
+  toCanvas(app.preview, 240).toBlob((b) => {
+    m.thumb = b;
+    if (app.thumbs.has(m.id)) URL.revokeObjectURL(app.thumbs.get(m.id));
+    app.thumbs.delete(m.id);
+    store.putMeta(m);
+    renderStrip();
+  }, 'image/jpeg', 0.8);
+}
+
+function frameWH() {
+  return frameSize(app.base.width, app.base.height, app.cur.settings.geometry);
+}
+
+function showCropBox() {
+  const g = app.cur.settings.geometry, [W, H] = frameWH();
+  if (!g.crop) g.crop = maxCrop(aspectRatio(g, W, H), W, H);
+  app.cropBox.show(g.crop, aspectRatio(g, W, H), W, H);
+}
+
+function toggleCrop(on) {
+  app.cropping = on;
+  document.body.classList.toggle('cropping', on);
+  $('#cropBtn').textContent = on ? '자르기 완료' : '자르기 편집';
+  if (!on) app.cropBox.hide();
+  changed();
 }
 
 function renderStrip() {
@@ -231,6 +332,13 @@ function tabs(names, onPick) {
   return bar;
 }
 
+/** 다른 사진의 보정을 입힌다. 자르기·회전은 지금 사진 것을 둔다 (Lightroom과 같음) */
+function adopt(st) {
+  const g = app.cur.settings.geometry;
+  app.cur.settings = withDefaults(st);
+  app.cur.settings.geometry = g;
+}
+
 function buildPanel() {
   const P = $('#panel');
 
@@ -250,7 +358,7 @@ function buildPanel() {
   const b = (t, f, cls = '') => { const x = el('button', 'btn ' + cls, t); x.onclick = f; return x; };
   row1.append(
     b('복사', () => { if (app.cur) { app.clipboard = clone(app.cur.settings); toast('보정을 복사함'); } }),
-    b('붙여넣기', () => { if (app.cur && app.clipboard) { app.cur.settings = clone(app.clipboard); syncAll(); changed(); } }),
+    b('붙여넣기', () => { if (app.cur && app.clipboard) { adopt(app.clipboard); syncAll(); changed(); } }),
     b('전체 초기화', () => { if (app.cur) { app.cur.settings = defaults(); syncAll(); changed(); } }),
   );
   const row2 = el('div', 'btnrow');
@@ -273,7 +381,7 @@ function buildPanel() {
   fillPresets();
   sel.onchange = () => {
     const p = presets()[sel.value];
-    if (p && app.cur) { app.cur.settings = withDefaults(p); syncAll(); changed(); toast(`프리셋 '${sel.value}' 적용`); }
+    if (p && app.cur) { adopt(p); syncAll(); changed(); toast(`프리셋 '${sel.value}' 적용`); }
     sel.selectedIndex = 0;
   };
   pre.append(sel,
@@ -291,6 +399,37 @@ function buildPanel() {
     }));
 
   P.append(section('기본', null, hist, autoBox, row1, row2, carry, pre));
+
+  // 자르기·회전
+  const G = () => app.cur.settings.geometry;
+  const rot = el('div', 'btnrow');
+  rot.append(
+    b('⟲ 90°', () => { if (!app.cur) return; G().rotate = (G().rotate + 270) % 360; G().crop = null; changed(); }),
+    b('⟳ 90°', () => { if (!app.cur) return; G().rotate = (G().rotate + 90) % 360; G().crop = null; changed(); }),
+    b('좌우 뒤집기', () => { if (!app.cur) return; G().flip = !G().flip; changed(); }),
+  );
+  const asp = el('select');
+  for (const [v, t] of ASPECTS) { const o = el('option', null, t); o.value = v; asp.append(o); }
+  asp.onchange = () => {
+    if (!app.cur) return;
+    G().aspect = asp.value;
+    const [W, H] = frameWH();
+    G().crop = asp.value === 'free' ? (G().crop || null) : maxCrop(aspectRatio(G(), W, H), W, H);
+    if (!app.cropping && asp.value !== 'free') toggleCrop(true); else changed();
+    if (app.cropping) showCropBox();
+  };
+  app.syncers.push(() => { asp.value = app.cur ? G().aspect : 'original'; });
+  const cropRow = el('div', 'btnrow');
+  const cropBtn = b('자르기 편집', () => { if (app.cur) toggleCrop(!app.cropping); }, 'primary');
+  cropBtn.id = 'cropBtn';
+  cropRow.append(el('span', null, '비율'), asp, cropBtn,
+    b('자르기 없애기', () => { if (!app.cur) return; G().crop = null; if (app.cropping) showCropBox(); changed(); }));
+  P.append(section('자르기·회전', ['geometry'],
+    rot,
+    slider({ label: '수평 맞추기 Straighten', path: 'geometry.angle', min: -45, max: 45, step: 0.1, fmt: (v) => (v > 0 ? '+' : '') + v.toFixed(1) + '°' }),
+    cropRow,
+    el('div', 'hint', '자르기 편집: 틀 안을 끌면 옮기기, 모서리를 끌면 크기. 수평을 맞추면 빈 모서리가 안 생기게 자동으로 확대됨'),
+  ));
 
   // Light
   P.append(section('Light', ['light'],
@@ -480,9 +619,14 @@ function buildExport() {
   all.onclick = () => { const l = app.photos.filter((p) => p.liked); l.length ? exportPhotos(l) : toast('하트 표시한 사진이 없습니다'); };
   row.append(one, all);
 
+  const gps = el('label', 'chk');
+  const gpsIn = el('input'); gpsIn.type = 'checkbox'; gpsIn.checked = app.keepGPS;
+  gpsIn.onchange = () => { app.keepGPS = gpsIn.checked; localStorage.setItem('ls.gps', app.keepGPS ? '1' : '0'); };
+  gps.append(gpsIn, el('span', null, '위치 정보(GPS) 함께 저장'));
   const grid = el('div', 'form');
   grid.append(el('span', null, '크기'), sizeSel, el('span', null, '품질'), q, el('span', null, '보낼 곳'), destSel);
-  return section('내보내기', null, grid, drive, row, el('div', 'hint', '원본에서 다시 그려 JPEG로 만듭니다. 원본은 바뀌지 않습니다.'));
+  return section('내보내기', null, grid, gps, drive, row,
+    el('div', 'hint', '원본에서 다시 그려 JPEG로 만듭니다. 촬영 날짜·카메라 정보(원본이 JPEG일 때)는 함께 저장되고, 원본은 바뀌지 않습니다.'));
 }
 
 async function exportPhotos(list) {
@@ -492,7 +636,7 @@ async function exportPhotos(list) {
     for (const [i, m] of list.entries()) {
       toast(`내보내는 중 ${i + 1}/${list.length}`);
       const blob = await store.getBlob(m.id);
-      const r = await renderJPEG(app.pipe, m, blob, app.exportEdge, app.quality);
+      const r = await renderJPEG(app.pipe, m, blob, app.exportEdge, app.quality, app.keepGPS);
       if (app.dest === 'drive') await uploadToDrive(r.file);
       files.push(r);
       m.exported = true;
@@ -563,6 +707,7 @@ function setupViewer() {
   });
   v.addEventListener('pointerup', (e) => {
     clearTimeout(lp);
+    if (app.cropping) return;
     const dx = e.clientX - x0, dy = e.clientY - y0;
     if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) && app.cur) {   // 좌우로 넘기기
       const i = app.photos.findIndex((p) => p.id === app.cur.id), j = i + (dx < 0 ? 1 : -1);
@@ -576,6 +721,21 @@ function setupViewer() {
   });
   v.addEventListener('pointercancel', () => clearTimeout(lp));
 
+  app.cropBox = new CropBox(v, cv, (crop) => {
+    app.cur.settings.geometry.crop = crop;
+    clearTimeout(saveTimer);
+    const m = app.cur;
+    saveTimer = setTimeout(() => store.putMeta(m), 400);
+    scheduleRecord(m);
+  });
+  window.addEventListener('resize', () => { if (app.cropping) app.cropBox.place(); });
+  $('#undoBtn').onclick = () => stepHistory(true);
+  $('#redoBtn').onclick = () => stepHistory(false);
+  window.addEventListener('keydown', (e) => {
+    if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'z' || /INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName) && document.activeElement.type !== 'range') return;
+    e.preventDefault();
+    stepHistory(!e.shiftKey);
+  });
   const before = $('#beforeBtn');
   const on = (e) => { e.preventDefault(); app.original = true; before.classList.add('on'); scheduleRender(); };
   const off = () => { app.original = false; before.classList.remove('on'); scheduleRender(); };

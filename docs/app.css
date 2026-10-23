@@ -19,6 +19,8 @@ button, select, input { font: inherit; color: inherit; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #111; font-weight: 600; }
 .btn.danger { color: var(--danger); }
 .btn:active { opacity: 0.7; }
+.btn.icon { font-size: 18px; padding: 2px 12px; line-height: 1.4; }
+.btn:disabled { opacity: 0.35; }
 .mini { background: none; border: none; color: var(--muted); font-size: 12px; cursor: pointer; }
 .chk { display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
 .chk input { width: 18px; height: 18px; accent-color: var(--accent); }
@@ -84,6 +86,18 @@ canvas.curve { width: 100%; aspect-ratio: 1; border-radius: 6px; touch-action: n
   background: #2b2b31; border: 1px solid #44444c; border-radius: 12px; padding: 10px 14px; display: flex; gap: 12px; align-items: center;
   transition: 0.2s; max-width: 90vw; z-index: 20; box-shadow: 0 6px 24px rgba(0,0,0,0.5); }
 #toast.show { opacity: 1; transform: translateX(-50%); pointer-events: auto; }
+
+/* 자르기 틀 */
+.cropbox { position: absolute; z-index: 5; border: 1px solid #fff; cursor: move; touch-action: none;
+  box-shadow: 0 0 0 9999px rgba(0,0,0,0.55);
+  background-image: linear-gradient(90deg, transparent calc(33.33% - 0.5px), rgba(255,255,255,0.35) calc(33.33% - 0.5px), rgba(255,255,255,0.35) calc(33.33% + 0.5px), transparent calc(33.33% + 0.5px), transparent calc(66.66% - 0.5px), rgba(255,255,255,0.35) calc(66.66% - 0.5px), rgba(255,255,255,0.35) calc(66.66% + 0.5px), transparent calc(66.66% + 0.5px)),
+    linear-gradient(transparent calc(33.33% - 0.5px), rgba(255,255,255,0.35) calc(33.33% - 0.5px), rgba(255,255,255,0.35) calc(33.33% + 0.5px), transparent calc(33.33% + 0.5px), transparent calc(66.66% - 0.5px), rgba(255,255,255,0.35) calc(66.66% - 0.5px), rgba(255,255,255,0.35) calc(66.66% + 0.5px), transparent calc(66.66% + 0.5px)); }
+.cropbox i { position: absolute; width: 26px; height: 26px; border: 4px solid #fff; }
+.cropbox i[data-h=nw] { left: -4px; top: -4px; border-right: none; border-bottom: none; cursor: nwse-resize; }
+.cropbox i[data-h=ne] { right: -4px; top: -4px; border-left: none; border-bottom: none; cursor: nesw-resize; }
+.cropbox i[data-h=sw] { left: -4px; bottom: -4px; border-right: none; border-top: none; cursor: nesw-resize; }
+.cropbox i[data-h=se] { right: -4px; bottom: -4px; border-left: none; border-top: none; cursor: nwse-resize; }
+body.cropping #hud { display: none; }
 
 /* 고객 보기: 사진만 */
 body.client #top, body.client #panel, body.client #strip, body.client #hud { display: none; }
