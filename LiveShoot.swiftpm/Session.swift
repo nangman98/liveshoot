@@ -1,11 +1,13 @@
 import CoreImage
 import Photos
+import PhotosUI
 import SwiftUI
 
 enum Source: String, Codable {
     case ftp = "a7 IV"
     case gr = "GR III"
     case photos = "보관함"
+    case imported = "가져옴"
 }
 
 struct Shot: Identifiable, Equatable {
@@ -37,7 +39,9 @@ final class Session: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     @Published var message: String?
     @Published var thumbs: [String: CGImage] = [:]
 
-    let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    // LIVESHOOT_DOCS는 Mac에서 시험할 때만 씀 (iPad에서는 없음)
+    let docs = ProcessInfo.processInfo.environment["LIVESHOOT_DOCS"].map { URL(fileURLWithPath: $0) }
+        ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     private var incoming: URL { docs.appendingPathComponent("Incoming") }
     private var exportDir: URL { docs.appendingPathComponent("Export") }
     private var stateURL: URL { docs.appendingPathComponent("liveshoot_state.json") }
@@ -130,10 +134,61 @@ final class Session: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     /// 받은 파일을 목록 맨 앞에 넣는다 (어느 스레드에서 불러도 됨)
     func add(url: URL, source: Source) {
         let ext = url.pathExtension.lowercased()
-        guard ["jpg", "jpeg", "heic", "heif", "png"].contains(ext) else { return }   // RAW는 받기만 하고 띄우지 않음
+        guard Session.photoExts.contains(ext) else { return }
         work.async {
-            guard let pv = Renderer.load(url: url, maxPixel: 2560) else { return }
+            guard let pv = Renderer.load(url: url, maxPixel: 2560) else {
+                DispatchQueue.main.async { self.message = "열 수 없는 사진: \(url.lastPathComponent)" }
+                return
+            }
             self.insert(id: url.path, name: url.lastPathComponent, source: source, url: url, assetID: nil, preview: pv)
+        }
+    }
+
+    /// JPG·HEIC 외에 iPadOS가 읽는 RAW(DNG, ARW, CR3 등)도 띄운다
+    static let photoExts: Set<String> = ["jpg", "jpeg", "heic", "heif", "png", "tif", "tiff",
+                                         "dng", "arw", "cr2", "cr3", "raf", "nef", "orf", "rw2"]
+
+    private var importDir: URL { incoming.appendingPathComponent("Imported") }
+
+    /// 파일 앱(Google Drive 포함)에서 고른 사진을 앱 안으로 복사해 목록에 넣는다
+    func importFiles(_ urls: [URL]) {
+        let dir = importDir
+        work.async {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            var n = 0
+            for u in urls {
+                let scoped = u.startAccessingSecurityScopedResource()
+                defer { if scoped { u.stopAccessingSecurityScopedResource() } }
+                var err: NSError?
+                var dst: URL?
+                // 클라우드에만 있는 파일은 여기서 내려받아진다
+                NSFileCoordinator().coordinate(readingItemAt: u, options: .withoutChanges, error: &err) { src in
+                    let d = uniqueURL(dir, src.lastPathComponent)
+                    if (try? FileManager.default.copyItem(at: src, to: d)) != nil { dst = d }
+                }
+                if let dst { n += 1; self.add(url: dst, source: .imported) }
+            }
+            DispatchQueue.main.async { self.message = "파일에서 \(n)장 가져옴" }
+        }
+    }
+
+    /// 사진 보관함에서 고른 사진(이미 있던 사진)을 앱 안으로 복사해 목록에 넣는다
+    func importPicked(_ items: [PhotosPickerItem]) {
+        let dir = importDir
+        Task {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            var n = 0
+            let stamp = Int(Date().timeIntervalSince1970)
+            for (i, item) in items.enumerated() {
+                guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
+                let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "jpg"
+                let dst = uniqueURL(dir, "IMG_\(stamp)_\(i + 1).\(ext)")
+                guard (try? data.write(to: dst)) != nil else { continue }
+                n += 1
+                add(url: dst, source: .imported)
+            }
+            let count = n
+            await MainActor.run { self.message = "보관함에서 \(count)장 가져옴" }
         }
     }
 
@@ -285,7 +340,7 @@ final class Session: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     private func restore() {
         let saved = (try? Data(contentsOf: stateURL)).flatMap { try? JSONDecoder().decode([String: Saved].self, from: $0) } ?? [:]
         var found: [(URL, Source, Date)] = []
-        for (sub, src) in [("a7IV", Source.ftp), ("GR", Source.gr)] {
+        for (sub, src) in [("a7IV", Source.ftp), ("GR", Source.gr), ("Imported", Source.imported)] {
             let dir = incoming.appendingPathComponent(sub)
             let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.creationDateKey])) ?? []
             for f in files where !f.lastPathComponent.hasPrefix(".") {

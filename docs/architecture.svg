@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 770" font-family="Apple SD Gothic Neo, Noto Sans KR, Pretendard, sans-serif">
+  <title>LiveShoot 구성도</title>
+  <desc>a7 IV는 FTP로, GR III는 카메라 Wi-Fi로 iPad의 받기 앱에 사진을 보낸다. 받기 앱은 사진을 바로 웹 편집기로 넘긴다. 웹 편집기는 GitHub Pages에서 열 때마다 최신판을 불러온다. 보정본은 긴 변 2400 px, 품질 85로 사진 보관함, 파일 앱, Google Drive 폴더에 저장한다. 원본 RAW 본보정은 따로 만든 Mac mini의 lightcraft-batch가 맡는다.</desc>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#555"/>
+    </marker>
+    <marker id="arA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#e5484d"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="1200" height="770" fill="#ffffff"/>
+
+  <!-- 열 제목 -->
+  <g font-size="13" fill="#777" font-weight="600">
+    <text x="30" y="28">카메라</text>
+    <text x="940" y="28">결과</text>
+  </g>
+
+  <!-- A: 카메라 -->
+  <g fill="#fafafa" stroke="#333" stroke-width="1.4">
+    <rect x="30" y="80" width="230" height="86" rx="8"/>
+    <rect x="30" y="210" width="230" height="86" rx="8"/>
+    <rect x="30" y="340" width="230" height="86" rx="8" stroke-dasharray="5 4"/>
+  </g>
+  <g fill="#111">
+    <text x="46" y="106" font-size="14" font-weight="700">Sony a7 IV</text>
+    <text x="46" y="128" font-size="11.5" opacity="0.72">FTP 전송 · 무선 또는 유선 LAN</text>
+    <text x="46" y="148" font-size="11.5" opacity="0.72">(USB-C 이더넷 + 공유기)</text>
+    <text x="46" y="236" font-size="14" font-weight="700">Ricoh GR III</text>
+    <text x="46" y="258" font-size="11.5" opacity="0.72">카메라 Wi-Fi (192.168.0.1)</text>
+    <text x="46" y="278" font-size="11.5" opacity="0.72">새 JPG를 2초마다 가져옴</text>
+    <text x="46" y="366" font-size="14" font-weight="700">촬영 뒤 가져오기</text>
+    <text x="46" y="388" font-size="11.5" opacity="0.72">사진 보관함 · 파일 앱</text>
+    <text x="46" y="408" font-size="11.5" opacity="0.72">SD 카드 리더 · Google Drive</text>
+  </g>
+
+  <!-- iPad 틀 -->
+  <rect x="300" y="40" width="600" height="420" rx="18" fill="none" stroke="#999" stroke-width="1.4"/>
+  <text x="320" y="66" font-size="13" font-weight="700" fill="#777">iPad</text>
+
+  <!-- B1 받기 앱 -->
+  <rect x="330" y="80" width="250" height="170" rx="8" fill="#fafafa" stroke="#333" stroke-width="1.4"/>
+  <g fill="#111">
+    <text x="346" y="106" font-size="14" font-weight="700">받기 앱 (네이티브)</text>
+    <text x="346" y="126" font-size="11.5" opacity="0.72">Swift Playgrounds로 한 번 설치</text>
+    <text x="346" y="154" font-size="12.5">FTP 서버 :2121 (a7 IV)</text>
+    <text x="346" y="176" font-size="12.5">GR Wi-Fi 확인 2 s (GR III)</text>
+    <text x="346" y="198" font-size="12.5">보관함 · 파일 가져오기</text>
+    <text x="346" y="220" font-size="12.5">받은 원본을 앱 안에 저장</text>
+    <text x="346" y="240" font-size="11.5" opacity="0.72">받는 방식이 바뀔 때만 다시 설치</text>
+  </g>
+
+  <!-- B2 웹 편집기 -->
+  <rect x="620" y="80" width="250" height="340" rx="8" fill="#fafafa" stroke="#333" stroke-width="1.4"/>
+  <g fill="#111">
+    <text x="636" y="106" font-size="14" font-weight="700">웹 편집기 (PWA)</text>
+    <text x="636" y="126" font-size="11.5" opacity="0.72">받기 앱 안 화면 또는 Safari 홈 화면</text>
+    <text x="636" y="158" font-size="13">Light · Curve</text>
+    <text x="636" y="182" font-size="13">Color · Color Mixer</text>
+    <text x="636" y="206" font-size="13">Point Color · Color Grading</text>
+    <text x="636" y="230" font-size="13">Effects · Detail</text>
+    <text x="636" y="262" font-size="12.5">자동 노출 · 프리셋 · 복사</text>
+    <text x="636" y="284" font-size="12.5">원본 비교 · 히스토그램</text>
+    <text x="636" y="306" font-size="12.5">고객 보기 · 하트</text>
+    <text x="636" y="338" font-size="11.5" opacity="0.72">원본을 기준으로 매번 다시 그림</text>
+    <text x="636" y="358" font-size="11.5" opacity="0.72">보정값은 iPad 안에 저장</text>
+  </g>
+
+  <!-- C: 결과 -->
+  <g fill="#fafafa" stroke="#333" stroke-width="1.4">
+    <rect x="940" y="80" width="230" height="110" rx="8"/>
+    <rect x="940" y="240" width="230" height="110" rx="8"/>
+  </g>
+  <g fill="#111">
+    <text x="956" y="106" font-size="14" font-weight="700">내보내기</text>
+    <text x="956" y="130" font-size="12.5">긴 변 2400 px · 품질 85</text>
+    <text x="956" y="150" font-size="11.5" opacity="0.72">(홈페이지 기준, 기본값)</text>
+    <text x="956" y="172" font-size="11.5" opacity="0.72">3000 · 4000 · 원본 크기 선택</text>
+    <text x="956" y="266" font-size="14" font-weight="700">저장 위치 선택</text>
+    <text x="956" y="290" font-size="12.5">사진 보관함</text>
+    <text x="956" y="310" font-size="12.5">파일 앱의 원하는 폴더</text>
+    <text x="956" y="330" font-size="12.5">지정한 Google Drive 폴더</text>
+  </g>
+
+  <!-- D: 바깥 -->
+  <rect x="620" y="520" width="250" height="90" rx="8" fill="#fafafa" stroke="#333" stroke-width="1.4"/>
+  <g fill="#111">
+    <text x="636" y="546" font-size="14" font-weight="700">GitHub Pages</text>
+    <text x="636" y="568" font-size="11.5" opacity="0.72">nangman98/liveshoot (공개)</text>
+    <text x="636" y="588" font-size="11.5" opacity="0.72">코드만 올라감, 사진은 안 올라감</text>
+  </g>
+  <rect x="940" y="520" width="230" height="110" rx="8" fill="#f3f3f3" stroke="#333" stroke-width="1.4"/>
+  <g fill="#111">
+    <text x="956" y="546" font-size="14" font-weight="700">Mac mini (나중 본보정)</text>
+    <text x="956" y="568" font-size="11.5" opacity="0.72">lightcraft-batch (비공개, 별도)</text>
+    <text x="956" y="590" font-size="12.5">LightCraft CLI</text>
+    <text x="956" y="610" font-size="12.5">외장하드 원본 RAW</text>
+  </g>
+
+  <!-- 실시간 경로 (강조) -->
+  <g stroke="#e5484d" stroke-width="2.4" fill="none" marker-end="url(#arA)">
+    <path d="M262,123 L326,140"/>
+    <path d="M262,253 L326,214"/>
+    <path d="M582,165 L616,165"/>
+  </g>
+  <text x="586" y="155" font-size="11" fill="#e5484d">바로</text>
+  <text x="586" y="186" font-size="11" fill="#e5484d">넘김</text>
+
+  <!-- 촬영 뒤 가져오기 -->
+  <g stroke="#555" stroke-width="1.6" fill="none" marker-end="url(#ar)">
+    <path d="M262,383 L616,383"/>
+    <path d="M872,135 L936,135"/>
+    <path d="M1055,192 L1055,236"/>
+  </g>
+  <text x="330" y="376" font-size="11" fill="#555">Safari에서 편집기만 쓸 때</text>
+
+  <!-- 코드 업데이트 (점선) -->
+  <path d="M745,518 L745,424" stroke="#555" stroke-width="1.6" stroke-dasharray="6 5" fill="none" marker-end="url(#ar)"/>
+  <text x="752" y="478" font-size="11" fill="#555">push하면 열 때 최신판</text>
+
+  <!-- SD 카드 원본 → Mac mini -->
+  <path d="M145,428 L145,690 L1055,690 L1055,634" stroke="#555" stroke-width="1.6" fill="none" marker-end="url(#ar)"/>
+  <text x="160" y="682" font-size="11" fill="#555">SD 카드 원본 (외장하드로 옮김)</text>
+
+  <!-- 범례 -->
+  <g font-size="11.5" fill="#555">
+    <line x1="30" y1="740" x2="66" y2="740" stroke="#e5484d" stroke-width="2.4"/>
+    <text x="74" y="744">실시간 경로</text>
+    <line x1="170" y1="740" x2="206" y2="740" stroke="#555" stroke-width="1.6"/>
+    <text x="214" y="744">사진 흐름</text>
+    <line x1="300" y1="740" x2="336" y2="740" stroke="#555" stroke-width="1.6" stroke-dasharray="6 5"/>
+    <text x="344" y="744">코드 업데이트</text>
+  </g>
+</svg>

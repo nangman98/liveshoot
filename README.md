@@ -1,6 +1,14 @@
 # LiveShoot: iPad 실시간 받기·보정
 
-**a7 IV(FTP), GR III(Wi-Fi), 사진 보관함으로 들어온 JPG를 받는 즉시 원본 기준으로 보정해 띄우고 그 자리에서 슬라이더로 고쳐 홈페이지 크기(긴 변 2400 px, 품질 85)로 내보내는 iPad 앱(0.2, Swift Playgrounds 프로젝트).** 2026-10-23 GitHub Actions에서 iOS 빌드가 성공함(Xcode 16.4, iOS SDK 18.5, `** BUILD SUCCEEDED **`). 받기와 보정 계산은 Mac에서 실측함(아래 시험 결과). iPad 실기기와 실제 카메라로는 아직 돌려 보지 않음.
+**a7 IV(FTP), GR III(Wi-Fi), 사진 보관함으로 들어온 JPG를 받는 즉시 원본 기준으로 보정해 띄우고 그 자리에서 슬라이더로 고쳐 홈페이지 크기(긴 변 2400 px, 품질 85)로 내보내는 iPad 앱(0.3, Swift Playgrounds 프로젝트).** 0.3에서 이미 있는 사진을 보관함·파일 앱(Google Drive 포함)에서 골라 가져오는 기능을 넣음. 2026-10-23 GitHub Actions에서 iOS 빌드가 성공함(Xcode 16.4, iOS SDK 18.5, `** BUILD SUCCEEDED **`). 받기와 보정 계산은 Mac에서 실측함(아래 시험 결과). iPad 실기기와 실제 카메라로는 아직 돌려 보지 않음.
+
+## 구성
+
+![LiveShoot 구성도](docs/architecture.svg)
+
+- **지금 (0.3)**: 받기와 보정이 앱 하나에 들어 있음. 보정은 노출, 대비, 하이라이트, 섀도, 색온도, 색조, Vibrance, 채도 8개
+- **다음**: 보정 화면을 웹 편집기(GitHub Pages)로 옮기고 Curve, Color Mixer, Point Color, Color Grading, Effects, Detail을 넣음. 받기 앱은 받은 사진을 편집기로 넘기는 일만 해서 다시 설치할 일이 거의 없음
+- **Mac mini와의 관계**: 원본 RAW 본보정은 별도 저장소 `lightcraft-batch`(비공개, LightCraft CLI)가 맡음. LiveShoot의 보정값은 Mac mini로 넘어가지 않음
 
 ## 파일
 
@@ -19,7 +27,8 @@
 |---|---|---|
 | a7 IV | 카메라 FTP 전송: 서버 = 앱에 뜬 iPad 주소, 포트 2121, 사용자·비밀번호 `liveshoot`, 수동(PASV) 모드 켬, 보안 프로토콜 끔, 자동 전송 켬, 전송 파일 JPEG. 카메라와 iPad를 같은 Wi-Fi(휴대폰 핫스팟 등)에 연결 | "a7 IV (FTP)" 켬 |
 | GR III | 카메라 무선 LAN을 켜고 iPad 설정 → Wi-Fi에서 GR 네트워크에 접속 | "GR III (Wi-Fi)" 켬. 켠 뒤 찍은 JPG만 받음 |
-| 그 밖 | Creators' App, GR WORLD, AirDrop, 케이블 가져오기로 사진 보관함에 들어온 사진 | "사진 보관함" 켬 |
+| 그 밖 (새 사진) | Creators' App, GR WORLD, AirDrop, 케이블 가져오기로 사진 보관함에 들어온 사진 | "사진 보관함 (새 사진)" 켬 |
+| 이미 있는 사진 | iPad 보관함, 파일 앱(Google Drive, SD 카드 리더 포함) | "보관함에서" 또는 "파일에서"로 여러 장 고름 |
 
 - **GR III 방식**: 리코가 공개한 API가 아니라 GRsync가 쓰는 `GET http://192.168.0.1/v1/photos` 목록과 `/v1/photos/<폴더>/<파일>` 받기를 씀([GRsync](https://github.com/metalunk/GRsync)). 펌웨어가 바뀌면 안 될 수 있음
 - **두 카메라 동시**: iPad가 GR Wi-Fi에 붙으면 a7 IV와 같은 Wi-Fi가 아니게 되어 a7 IV FTP는 끊김. a7 IV를 GR Wi-Fi에 붙이면 둘 다 될 수도 있지만 시험 전임 [잠정]
@@ -66,4 +75,5 @@ Mac(M4)에서 앱의 `Renderer`·`FTPServer`·`GRClient` 코드를 그대로 컴
 
 - **야경**: 자동 노출이 야경을 너무 밝게 잡음(+1.62 EV, 밝기 106.6 → 178.8). 화면에서 노출을 내리거나 자동 노출을 끔
 - **iPad 실기기**: Swift Playgrounds 빌드, 권한 창, FTP 받기(a7 IV 실기), GR III 실기 응답 형식은 아직 확인 못 함
-- **RAW**: FTP·GR로 RAW가 와도 저장만 하고 띄우지 않음. 실시간은 JPEG 전송을 씀
+- **RAW**: DNG·ARW·CR3 등은 iPadOS가 읽을 수 있으면 띄움. 실기기에서 확인 전임 [잠정]. 실시간은 JPEG 전송을 씀
+- **FTP 계정**: 기본 계정 `liveshoot`/`liveshoot`은 코드에 공개됨. 같은 Wi-Fi의 다른 사람도 이 계정으로 올릴 수 있음. 다음 판에서 비밀번호를 바꿀 수 있게 함

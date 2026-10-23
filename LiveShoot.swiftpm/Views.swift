@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 #if os(iOS)
 import UIKit
@@ -102,7 +103,7 @@ struct EditorView: View {
                 .padding(14)
             } else {
                 Color.black
-                Text("오른쪽 '받기'를 켜고 촬영하면 여기에 바로 뜹니다").foregroundColor(.gray).padding(.bottom, 200)
+                Text("오른쪽 '받기'를 켜고 촬영하거나, 이미 있는 사진을 가져오면 여기에 뜹니다").foregroundColor(.gray).padding(.bottom, 200)
             }
         }
     }
@@ -141,6 +142,8 @@ struct EditorView: View {
 struct SidePanel: View {
     @EnvironmentObject var s: Session
     @State private var confirmClear = false
+    @State private var picked: [PhotosPickerItem] = []
+    @State private var showImporter = false
 
     private var edit: Binding<Edit> {
         Binding(get: { s.current?.edit ?? Edit() }, set: { s.updateEdit($0) })
@@ -159,8 +162,23 @@ struct SidePanel: View {
                         }
                         Toggle("GR III (Wi-Fi)", isOn: Binding(get: { s.grOn }, set: { s.setGR($0) }))
                         if s.grOn { Text(s.grState).font(.caption).foregroundColor(.secondary) }
-                        Toggle("사진 보관함", isOn: Binding(get: { s.photosOn }, set: { s.setPhotos($0) }))
+                        Toggle("사진 보관함 (새 사진)", isOn: Binding(get: { s.photosOn }, set: { s.setPhotos($0) }))
                         if s.photosOn { Text(s.photosState).font(.caption).foregroundColor(.secondary) }
+                        Divider()
+                        Text("이미 있는 사진 가져오기").font(.caption).foregroundColor(.secondary)
+                        HStack {
+                            PhotosPicker(selection: $picked, matching: .images) {
+                                Label("보관함에서", systemImage: "photo.on.rectangle")
+                            }
+                            Spacer()
+                            Button { showImporter = true } label: { Label("파일에서", systemImage: "folder") }
+                        }
+                        .onChange(of: picked) { items in
+                            if !items.isEmpty { s.importPicked(items); picked = [] }
+                        }
+                        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.image], allowsMultipleSelection: true) { r in
+                            if case let .success(urls) = r { s.importFiles(urls) }
+                        }
                     }
                 }
 

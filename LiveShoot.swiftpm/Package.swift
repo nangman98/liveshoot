@@ -15,8 +15,8 @@ let package = Package(
             name: "LiveShoot",
             targets: ["AppModule"],
             bundleIdentifier: "com.nangman98.liveshoot",
-            displayVersion: "0.2",
-            bundleVersion: "2",
+            displayVersion: "0.3",
+            bundleVersion: "3",
             appIcon: .placeholder(icon: .camera),
             accentColor: .presetColor(.orange),
             supportedDeviceFamilies: [
