@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <title>lightcraft-batch</title>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5b8def"/>
+      <stop offset="1" stop-color="#3a4fc8"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#g)"/>
+  <g fill="none" stroke="#fff" stroke-width="26" stroke-linejoin="round">
+    <rect x="170" y="110" width="220" height="160" rx="18" opacity="0.45"/>
+    <rect x="145" y="165" width="220" height="160" rx="18" opacity="0.7"/>
+    <rect x="120" y="220" width="220" height="160" rx="18"/>
+  </g>
+  <path d="M150 350 L210 290 L250 330 L280 300 L320 350 Z" fill="#fff"/>
+  <circle cx="290" cy="262" r="16" fill="#fff"/>
+</svg>

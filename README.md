@@ -25,7 +25,8 @@
   <a href="#카메라-연결">카메라 연결</a> ·
   <a href="#내보내기">내보내기</a> ·
   <a href="#구성">구성</a> ·
-  <a href="#시험-결과">시험 결과</a>
+  <a href="#시험-결과">시험 결과</a> ·
+  <a href="#같이-쓰는-앱">같이 쓰는 앱</a>
 </p>
 
 
@@ -131,6 +132,17 @@
 - **사진 보관함에서 고른 사진의 위치**: iPad Safari가 사진 보관함에서 올릴 때 위치를 빼는지 확인 전. 빼면 파일 앱에서 고른 원본은 위치가 남음 [잠정]
 - **RAW 속도와 메모리**: iPad에서 원본 크기(전체 해독) 내보내기가 메모리 한도 안에서 되는지 확인 전
 - **Detail 품질**: 1:1 확대가 없고 노이즈 줄이기·샤픈이 단순해 Lightroom에 못 미침. 다음 판에서 확대와 가장자리 보존 필터를 넣음
+
+## 같이 쓰는 앱
+
+**현장에서는 iPad의 LiveShoot으로 받아 바로 보정하고 나중에 Mac mini의 lightcraft-batch로 원본을 한꺼번에 본보정함.** 둘은 따로 설치하고 각자 따로 써도 됨.
+
+| | 앱 | 하는 일 | 기기 | 코드 | 바로 가기 |
+|---|---|---|---|---|---|
+| <img src="docs/icons/icon-180.png" width="32" height="32" alt="LiveShoot 아이콘"> | **LiveShoot** | **촬영 현장 실시간 받기·보정 · 지금 보는 앱** | iPad (Safari, Swift Playgrounds) | [GitHub](https://github.com/nangman98/liveshoot) | [웹 편집기](https://nangman98.github.io/liveshoot/) |
+| <img src="docs/icons/batch-180.png" width="32" height="32" alt="lightcraft-batch 아이콘"> | **lightcraft-batch** | 원본 RAW·JPG 폴더 일괄 본보정 (LightCraft CLI) | Mac mini, Google Colab | [GitHub](https://github.com/nangman98/lightcraft-batch) (비공개) | [Colab](https://colab.research.google.com/drive/16qso8ncANkrXeF0XKk05sl0fWh1K9G_r) |
+
+흐름: 촬영 → iPad LiveShoot에서 확인·빠른 보정·하트 → Mac mini lightcraft-batch로 원본 본보정 → 홈페이지용 긴 변 2400 px.
 
 ## 라이선스
 
