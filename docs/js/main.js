@@ -1,9 +1,10 @@
 import { Pipeline } from './gl.js';
 import { store, defaults, withDefaults, clone } from './store.js';
 import { CurveEditor } from './curve.js';
-import { renderGeometry, frameSize, aspectRatio, maxCrop, CropBox, ASPECTS } from './geometry.js';
+import { renderGeometry, geomPlan, geomRows, frameSize, aspectRatio, maxCrop, CropBox, ASPECTS } from './geometry.js';
 import { readExif } from './exif.js';
-import { isRaw, decodeRaw, rawInfo } from './raw.js';
+import { isRaw, decodeRaw, rawInfo, rawTiffInfo } from './raw.js';
+import { fitCameraLook } from './camera.js';
 import { PROFILES, PROFILE_GROUPS, profileById } from './profiles.js';
 import { parseLUTFile, INPUTS } from './lut.js';
 import { parseXMP } from './xmp.js';
@@ -14,7 +15,7 @@ const saveLutMeta = (l) => localStorage.setItem('ls.luts', JSON.stringify(l));
 const allProfiles = () => [...PROFILES, ...lutMeta().map((l) => ({ id: 'lut:' + l.id, name: l.name, ko: 'LUT', group: 'lut' }))];
 import { loadImage, toCanvas, renderJPEG, download, canShareFiles, driveConfig, saveDriveConfig, driveToken, pickDriveFolder, uploadToDrive } from './export.js';
 
-export const VERSION = 'v11';
+export const VERSION = 'v12';
 const PREVIEW = 2048;   // 화면용 긴 변 (px)
 const BASE = 3072;      // 자르기·회전 전에 읽어 두는 원본 (긴 변 px)
 
@@ -30,7 +31,7 @@ const app = {
   exportEdge: +(localStorage.getItem('ls.edge') || 2400), quality: +(localStorage.getItem('ls.q') || 85),
   dest: localStorage.getItem('ls.dest') || 'share',
   keepGPS: localStorage.getItem('ls.gps') !== '0',
-  base: null, cropping: false, geomKey: '', cropBox: null,
+  base: null, cropping: false, geomKey: '', cropBox: null, hi: null, hiId: null, hiJob: null,
 };
 
 // ---------- 공통 ----------
@@ -113,10 +114,20 @@ function updateProfileThumbs() {
  */
 function autoTone() {
   if (!app.cur) return;
-  applyAuto(app.cur.settings, app.preview);
+  applyAuto(app.cur.settings, shown(app.preview, app.cur.look, 256));
   syncAll();
   changed();
   toast('Auto: 히스토그램 기준으로 톤 8개를 맞춤');
+}
+
+/** 보정 전 그대로 보이는 캔버스. 카메라 룩이 있는 RAW는 캔버스가 카메라 RGB라 파이프라인으로 그려야 보인다 */
+function shown(canvas, look, edge) {
+  const s = toCanvas(canvas, edge);
+  if (!look) return s;
+  const keep = app.pipe.look, st = defaults();
+  st.autoExposure = false;
+  app.pipe.setLook(look);
+  try { return app.pipe.renderMany(s, s.width, s.height, [st], 0)[0]; } finally { app.pipe.setLook(keep); }
 }
 
 /** Auto 값을 st에 적음 (canvas: 보정 전 사진) */
@@ -237,28 +248,41 @@ async function importFiles(files) {
   let n = 0;
   for (const f of files) {
     try {
-      let img, rawMeta = null;
+      let img, rawMeta = null, rawHi = null, look = null, camInfo = null, tiff = null;
       if (isRaw(f)) {
         toast(`RAW 해독 중: ${f.name}`);
-        const r = await decodeRaw(f, { half: true });
+        // 카메라 JPEG 맞춤: 카메라 RGB로 해독하고 내장 JPEG에 맞춰 룩을 찾는다. 못 찾으면 LibRaw 색으로 다시 해독
+        let r = await decodeRaw(f, { half: true, hi: !!app.pipe.half, camera: !app.noCamMatch, thumb: true });
+        if (app.noCamMatch) camInfo = { reason: '끔 (시험용)' };
+        else if (r.thumb && r.proxy) {
+          try {
+            const fit = await fitCameraLook(r.proxy, r.thumb, { model: r.meta.camera_model, flip: r.meta.flip, adobe: r.meta.color_data?.ExifColorSpace === 2 });
+            look = fit.look; camInfo = fit.info;
+          } catch (e) { camInfo = { error: e.message }; }
+        } else camInfo = { reason: '내장 JPEG 없음' };
+        if (!look) r = await decodeRaw(f, { half: true, hi: !!app.pipe.half });
         img = r.canvas;
         rawMeta = r.meta;
+        rawHi = r.hi;
+        tiff = await rawTiffInfo(f);
       } else {
         img = await loadImage(f);
       }
       const c = toCanvas(img, BASE);
-      const thumb = await new Promise((r) => toCanvas(c, 240).toBlob(r, 'image/jpeg', 0.8));
+      const thumb = await new Promise((r) => shown(c, look, 240).toBlob(r, 'image/jpeg', 0.8));
       let settings = app.carry && app.cur ? clone(app.cur.settings) : startSettings();
       const rule = autoCfg(), rp = rule.preset && allPresets()[rule.preset];
       if (rp) settings = withDefaults(rp);           // 새 사진에 입힐 프리셋
       settings.geometry = defaults().geometry;
-      if (rule.auto) applyAuto(settings, c);          // 새 사진에 Auto
+      if (look) settings.autoExposure = false;        // 카메라 룩이 노출까지 정함
+      if (rule.auto) applyAuto(settings, shown(c, look, 256));   // 새 사진에 Auto
       const ex = rawMeta ? null : await readExif(f);
       const meta = {
         id: crypto.randomUUID(), name: f.name || `photo_${Date.now()}.jpg`, added: Date.now(),
         w: rawMeta ? img.width * 2 : img.naturalWidth, h: rawMeta ? img.height * 2 : img.naturalHeight,
-        autoEV: autoEV(c), settings, liked: false, exported: false, thumb,
-        exif: rawMeta ? rawInfo(rawMeta) : ex ? ex.info : null, raw: !!rawMeta,
+        autoEV: look ? 0 : autoEV(c), settings, liked: false, exported: false, thumb,
+        exif: rawMeta ? rawInfo(rawMeta, tiff) : ex ? ex.info : null, raw: !!rawMeta,
+        ...(rawMeta ? { rawMode: look ? 'camera' : 'srgb', look, camInfo } : {}),
       };
       await store.putBlob(meta.id, f);
       // RAW는 해독이 느리니 화면용 원본을 따로 둔다
@@ -266,7 +290,7 @@ async function importFiles(files) {
       await store.putMeta(meta);
       app.photos.unshift(meta);
       n++;
-      if (app.follow || !app.cur) await select(meta.id, c);
+      if (app.follow || !app.cur) await select(meta.id, c, rawHi);
       else renderStrip();
       // 받는 즉시 내보내기: Drive 지정 폴더일 때만 (공유·다운로드는 손으로 눌러야 하는 동작이라)
       if (rule.autoExport && app.dest === 'drive' && driveConfig().folderId) exportPhotos([meta], true);
@@ -278,10 +302,49 @@ async function importFiles(files) {
   if (n) toast(`${n}장 가져옴`);
 }
 
-async function select(id, ready) {
+// RAW의 16비트 원본 (지금 사진 것만 GPU에 둔다)
+function setHi(id, img) {
+  if (!app.cur || app.cur.id !== id || !img) return;
+  app.pipe.dropHi(app.hi);
+  app.hi = app.pipe.hiSource(img);
+  app.hiId = app.hi ? id : null;
+  if (app.hi && app.base) { refreshPreview(); scheduleRender(); }
+}
+
+// 16비트 원본 해제. keep: 이 사진의 해독은 진행 중이면 그대로 둔다
+function releaseHi(keep) {
+  if (app.hiJob && app.hiJob.id !== keep) { app.hiJob.ctrl.abort(); app.hiJob = null; }
+  app.pipe.dropHi(app.hi);
+  app.hi = null; app.hiId = null;
+}
+
+async function loadHi(m) {
+  if (app.hiJob && app.hiJob.id === m.id) return;   // 같은 사진 해독이 이미 진행 중
+  if (app.hiJob) app.hiJob.ctrl.abort();
+  const job = app.hiJob = { id: m.id, ctrl: new AbortController() };
+  try {
+    const r = await decodeRaw(await store.getBlob(m.id), { half: true, hi: true, canvas: false, signal: job.ctrl.signal, camera: m.rawMode === 'camera' });
+    if (app.hiJob === job) setHi(m.id, r.hi);
+  } catch (e) {
+    if (!job.ctrl.signal.aborted) toast('16비트 해독 실패, 8비트로 편집: ' + (e && e.message));
+  } finally {
+    if (app.hiJob === job) app.hiJob = null;
+  }
+}
+
+// 사진이 하나도 없을 때: GPU의 원본·흐림 단계까지 비운다
+function releaseAll() {
+  releaseHi();
+  app.pipe.free(app.pipe.set);
+  app.pipe.set = null;
+}
+
+async function select(id, ready, hiImg) {
   const m = app.photos.find((p) => p.id === id);
   if (!m) return;
   app.cur = m;
+  if (app.hiId !== id) releaseHi(id);
+  app.pipe.setLook(m.look || null);
   let c = ready;
   if (!c) {
     const blob = await store.getBlob(m.raw ? id + ':base' : id);
@@ -298,9 +361,11 @@ async function select(id, ready) {
   syncAll();
   scheduleRender();
   renderStrip();
+  if (m.raw && app.pipe.half && !app.hi) { if (hiImg) setHi(id, hiImg); else loadHi(m); }
   const e = m.exif || {};
   $('#photoName').textContent = [m.name, `${m.w}×${m.h}`, e.date ? e.date.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3') : '날짜 정보 없음',
-    e.gps ? `위치 ${e.gps.lat.toFixed(4)}, ${e.gps.lon.toFixed(4)}` : '위치 정보 없음', e.model].filter(Boolean).join(' · ');
+    e.gps ? `위치 ${e.gps.lat.toFixed(4)}, ${e.gps.lon.toFixed(4)}` : '위치 정보 없음', e.model, e.lens,
+    m.rawMode === 'camera' ? '카메라 JPEG 색' : m.raw ? 'LibRaw 색' : null].filter(Boolean).join(' · ');
   $('#heart').textContent = m.liked ? '♥' : '♡';
 }
 
@@ -315,14 +380,19 @@ function refreshPreview() {
   const m = app.cur, g = m.settings.geometry;
   const was = app.geomKey;
   app.preview = renderGeometry(app.base, g, PREVIEW, { ignoreCrop: app.cropping });
-  app.pipe.setPreview(app.preview, app.preview.width, app.preview.height, m.settings.detail.sharpen.radius);
+  // RAW는 16비트 원본에서 같은 자르기·회전으로 그린다 (8비트 미리보기는 썸네일·히스토그램용)
+  const W = app.preview.width, H = app.preview.height;
+  const src = app.hi && app.hiId === m.id
+    ? { hiTex: app.hi, ...geomRows(app.hi.w, app.hi.h, geomPlan(app.hi.w, app.hi.h, g, 0, { ignoreCrop: app.cropping, size: [W, H] })) }
+    : app.preview;
+  app.pipe.setPreview(src, W, H, m.settings.detail.sharpen.radius);
   app.geomKey = geomKey();
   if (app.cropping) requestAnimationFrame(() => showCropBox());
   else if (was && was !== app.geomKey && was.endsWith(m.id)) updateThumb(m);   // 같은 사진에서 기하가 바뀌면 썸네일도
 }
 
 function updateThumb(m) {
-  toCanvas(app.preview, 240).toBlob((b) => {
+  shown(app.preview, m.look, 240).toBlob((b) => {
     m.thumb = b;
     if (app.thumbs.has(m.id)) URL.revokeObjectURL(app.thumbs.get(m.id));
     app.thumbs.delete(m.id);
@@ -863,12 +933,13 @@ function buildPanel() {
           await store.del(id);
           app.photos = app.photos.filter((p) => p.id !== id);
           app.cur = null;
-          if (app.photos[0]) select(app.photos[0].id); else { document.body.classList.remove('has-photo'); renderStrip(); }
+          if (app.photos[0]) select(app.photos[0].id); else { releaseAll(); document.body.classList.remove('has-photo'); renderStrip(); }
         }, 'danger'),
         b('전부 지우기', async () => {
           if (!confirm('가져온 사진을 모두 지울까요? (사진 보관함·Drive의 원본은 그대로)')) return;
           await store.clear();
           app.photos = []; app.cur = null;
+          releaseAll();
           document.body.classList.remove('has-photo');
           renderStrip();
         }, 'danger'));

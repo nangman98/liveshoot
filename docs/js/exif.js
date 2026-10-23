@@ -65,7 +65,7 @@ export function info(seg) {
     const ex = find(ifd0, 0x8769), gp = find(ifd0, 0x8825);
     const exif = ex ? entries(T, T.u32(ex.at)) : [];
     const date = ascii(T, find(exif, 0x9003)) || ascii(T, find(ifd0, 0x0132));
-    const model = ascii(T, find(ifd0, 0x0110));
+    const model = ascii(T, find(ifd0, 0x0110)), lens = ascii(T, find(exif, 0xa434));
     let gps = null;
     if (gp) {
       const g = entries(T, T.u32(gp.at));
@@ -75,10 +75,17 @@ export function info(seg) {
         gps = { lat: dms(la) * (ascii(T, find(g, 0x0001)) === 'S' ? -1 : 1), lon: dms(lo) * (ascii(T, find(g, 0x0003)) === 'W' ? -1 : 1) };
       }
     }
-    return { date, model, gps };
+    return { date, model, gps, lens };
   } catch {
-    return { date: null, model: null, gps: null };
+    return { date: null, model: null, gps: null, lens: null };
   }
+}
+
+/** TIFF 파일 앞부분(ARW 등) → info와 같은 모양 */
+export function tiffInfo(bytes) {
+  const seg = new Uint8Array(TIFF + bytes.length);
+  seg.set(bytes, TIFF);
+  return info(seg);
 }
 
 /**

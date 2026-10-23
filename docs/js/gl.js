@@ -1,4 +1,5 @@
 import { effective } from './profiles.js';
+import { toneLUT, TO_PROPHOTO, FROM_PROPHOTO, REC2020_SRGB, LUT_N as LUT_W } from './camera.js';
 
 // WebGL2 보정 엔진. 늘 원본(미리보기 크기)에서 처음부터 다시 그린다.
 // 패스: 원본 → 흐림 3단(작게 S, 중간 M, 크게 L) → 메인 셰이더 1번.
@@ -24,6 +25,16 @@ const COPY = `#version 300 es
 precision highp float;
 in vec2 uv; out vec4 o; uniform sampler2D t;
 void main(){ o = texture(t, uv); }`;
+
+// 16비트 원본 → 자르기·회전을 마친 화면 크기 (geometry.js geomRows). 결과 화소의 위쪽 원점 좌표로 원본 uv를 찾는다.
+const GEOM = `#version 300 es
+precision highp float;
+in vec2 uv; out vec4 o; uniform sampler2D t; uniform vec3 uRow0, uRow1; uniform vec2 uOut;
+void main(){
+  vec3 q = vec3(gl_FragCoord.x, uOut.y - gl_FragCoord.y, 1.0);
+  vec2 s = vec2(dot(uRow0, q), dot(uRow1, q));
+  o = any(lessThan(s, vec2(0.0))) || any(greaterThan(s, vec2(1.0))) ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(texture(t, s).rgb, 1.0);
+}`;
 
 // 첫 축소: 알파에 밝기² (guided filter용 국소 분산 = E[I²] − E[I]²)
 const PREP = `#version 300 es
@@ -58,6 +69,12 @@ uniform vec3 uGrain;      // amount, size, roughness
 uniform vec3 uSharp;      // amount, detail, masking
 uniform vec3 uNR;         // amount, detail, contrast
 uniform vec3 uCNR;        // amount, detail, smoothness
+// RAW 카메라 JPEG 룩 (camera.js, LightCraft의 camera look 마무리 단계와 같은 계산)
+uniform float uCam, uHsvOn, uHsvSrgb;
+uniform mat3 uCamM, uToPP, uFromPP, uTo709;   // 카메라 RGB → 선형 Rec.2020, Rec.2020 ↔ ProPhoto, Rec.2020 → 선형 sRGB
+uniform sampler2D uTone, uHsv;                // 톤 표 4096×1 (EV −14…10), hue/sat 표 (색상×채도)×밝기
+uniform vec3 uHsvDim;
+uniform float uChroma[8];
 
 float luma(vec3 c){ return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 vec3 toLin(vec3 c){ return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
@@ -93,6 +110,66 @@ vec3 lut3(vec3 lin, vec3 srgb){
   x = clamp(x, 0.0, 1.0) * (63.0 / 64.0) + 0.5 / 64.0;
   return texture(uLut3, x).rgb;
 }
+float lum2020(vec3 c){ return dot(c, vec3(0.2627, 0.6780, 0.0593)); }
+float camTone(float y){
+  if (y <= 0.0) return 0.0;
+  float ev = log2(y / 0.18), f = clamp((ev + 14.0) / 24.0, 0.0, 1.0) * 4095.0;
+  int i = min(int(f), 4094);
+  float v = mix(texelFetch(uTone, ivec2(i, 0), 0).r, texelFetch(uTone, ivec2(i + 1, 0), 0).r, f - float(i));
+  return ev < -14.0 ? v * (y / (0.18 * exp2(-14.0))) : v;
+}
+float camChroma(float o){ float f = clamp(o, 0.0, 1.0) * 7.0; int i = min(int(f), 6); return mix(uChroma[i], uChroma[i + 1], f - float(i)); }
+vec3 hsvAt(int v, int h, int s){ return texelFetch(uHsv, ivec2(h * int(uHsvDim.y) + s, v), 0).rgb; }
+vec3 hsvLookup(float h, float s, float v){
+  int hd = int(uHsvDim.x), sd = int(uHsvDim.y), vd = int(uHsvDim.z);
+  float hf = clamp(mod(h, 360.0) / 360.0 * uHsvDim.x, 0.0, uHsvDim.x);
+  int h0 = min(int(hf), hd - 1), h1 = (h0 + 1) % hd;
+  float th = clamp(hf - float(h0), 0.0, 1.0);
+  float sf = clamp(s, 0.0, 1.0) * float(sd - 1);
+  int s0 = min(int(sf), max(sd - 2, 0)), s1 = min(s0 + 1, sd - 1);
+  float ts = clamp(sf - float(s0), 0.0, 1.0);
+  int v0 = 0, v1 = 0; float tv = 0.0;
+  if (vd > 1) { float vf = clamp(v, 0.0, 1.0) * float(vd - 1); v0 = min(int(vf), vd - 2); v1 = min(v0 + 1, vd - 1); tv = clamp(vf - float(v0), 0.0, 1.0); }
+  vec3 a = mix(mix(hsvAt(v0, h0, s0), hsvAt(v0, h0, s1), ts), mix(hsvAt(v0, h1, s0), hsvAt(v0, h1, s1), ts), th);
+  if (v0 == v1) return a;
+  vec3 b = mix(mix(hsvAt(v1, h0, s0), hsvAt(v1, h0, s1), ts), mix(hsvAt(v1, h1, s0), hsvAt(v1, h1, s1), ts), th);
+  return mix(a, b, tv);
+}
+float lin2srgb(float v){ return v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1.0 / 2.4) - 0.055; }
+float srgb2lin(float v){ return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4); }
+float limitedK(float x, float k){ return x <= 1.0 ? min(x * k, 1.0) : x * min(k, 1.0); }
+vec3 hsvToRgbX(float h, float s, float v){
+  float hp = mod(h, 360.0) / 60.0; int sec = min(int(hp), 5); float f = hp - float(sec);
+  float p = v * (1.0 - s), q = v * (1.0 - s * f), t = v * (1.0 - s * (1.0 - f));
+  if (sec == 0) return vec3(v, t, p); if (sec == 1) return vec3(q, v, p); if (sec == 2) return vec3(p, v, t);
+  if (sec == 3) return vec3(p, q, v); if (sec == 4) return vec3(t, p, v); return vec3(v, p, q);
+}
+vec3 hsvTable(vec3 c){   // DNG ProfileHueSatMap (선형 ProPhoto)
+  float mx = max(max(c.r, c.g), c.b);
+  if (!(mx > 0.0) || isinf(mx)) return c;
+  float mn = min(min(c.r, c.g), c.b), d = mx - mn, hue = 0.0;
+  if (d > 0.0) hue = (mx == c.r ? mod((c.g - c.b) / d, 6.0) : mx == c.g ? (c.b - c.r) / d + 2.0 : (c.r - c.g) / d + 4.0) * 60.0;
+  float sat = d / mx;
+  bool sv = uHsvSrgb > 0.5;
+  float vi = sv ? lin2srgb(min(mx, 1.0)) : mx;
+  vec3 e = hsvLookup(hue, sat, vi);
+  float v2 = sv && mx <= 1.0 ? (e.z == 1.0 ? mx : srgb2lin(min(vi * e.z, 1.0))) : sv ? mx * min(srgb2lin(min(e.z, 1.0)), 1.0) : limitedK(mx, e.z);
+  return hsvToRgbX(hue + e.x, limitedK(sat, e.y), v2);
+}
+vec3 camLook(vec3 cam){   // 카메라 RGB(선형) → 선형 sRGB
+  vec3 w = uCamM * cam;
+  if (uHsvOn > 0.5) {
+    vec3 o = uFromPP * hsvTable(uToPP * w);
+    float b = lum2020(w), a = lum2020(o);
+    if (b > 0.0 && a > 0.0 && !any(isnan(o)) && !any(isinf(o))) { float t = clamp((a / b - 0.15) / 0.1, 0.0, 1.0); w = mix(w, o * b / a, t * t * (3.0 - 2.0 * t)); }
+  }
+  vec3 s = max(w, 0.0);
+  float y = lum2020(s);
+  if (y <= 0.0) return vec3(0.0);
+  float o = camTone(y), k = camChroma(o);
+  return uTo709 * (o + (s * o / y - o) * k);
+}
+
 vec3 gradeTint(vec3 g){ vec3 c = hsv2rgb(vec3(g.x, 1.0, 1.0)); return (c - luma(c)) * g.y * 0.3; }
 
 const float CEN[8] = float[8](0.0, 0.0833, 0.1667, 0.3333, 0.5, 0.6667, 0.75, 0.8333);
@@ -100,7 +177,8 @@ const float SPAN[8] = float[8](0.0833, 0.0833, 0.125, 0.1667, 0.1667, 0.125, 0.0
 
 void main(){
   vec3 c = texture(uSrc, uv).rgb;
-  if (uOriginal > 0.5) { o = vec4(c, 1.0); return; }
+  // 원본 보기: 사용자 보정만 빼고, RAW 카메라 룩(시작 색감)은 그대로
+  if (uOriginal > 0.5) { o = vec4(uCam > 0.5 ? clamp(toSrgb(camLook(toLin(clamp(c, 0.0, 1.0)))), 0.0, 1.0) : c, 1.0); return; }
   vec4 l4 = texture(uL, uv);
   vec3 s = texture(uS, uv).rgb, m = texture(uM, uv).rgb, l = l4.rgb;
   // 국소 분산이 큰 곳(보케·밝은 가장자리)은 넓은 주변 대신 좁은 주변을 기준으로 (헤일로 폭을 M 반경으로 줄임)
@@ -132,14 +210,17 @@ void main(){
   // 노출·화이트밸런스는 선형에서
   vec3 wb = vec3(1.0 + 0.3 * uTemp, 1.0 - 0.25 * uTint, 1.0 - 0.3 * uTemp);
   float gain = exp2(uExposure);
-  vec3 p = toSrgb(toLin(clamp(c, 0.0, 1.0)) * gain * wb);
-  vec3 pl = toSrgb(toLin(l) * gain * wb);   // 주변 밝기 (하이라이트·섀도·Clarity 기준)
-  vec3 pm = toSrgb(toLin(m) * gain * wb);   // 좁은 주변 (밝은 가장자리 근처에서 대신 씀)
+  vec3 lc0 = toLin(clamp(c, 0.0, 1.0)) * gain * wb, ll0 = toLin(l) * gain * wb, lm0 = toLin(m) * gain * wb;
+  // RAW: 카메라 JPEG 룩 (장면 선형 카메라 RGB → 화면). 노출·화이트밸런스는 그 앞, 장면 값에서
+  if (uCam > 0.5) { lc0 = camLook(lc0); ll0 = camLook(ll0); lm0 = camLook(lm0); }
+  vec3 p = toSrgb(lc0);
+  vec3 pl = toSrgb(ll0);   // 주변 밝기 (하이라이트·섀도·Clarity 기준)
+  vec3 pm = toSrgb(lm0);   // 좁은 주변 (밝은 가장자리 근처에서 대신 씀)
   // 가져온 LUT: 노출·화이트밸런스 바로 뒤, 다른 톤 보정 앞 (LUT 제작자 권장 순서)
   if (uLutAmt > 0.0) {
-    p = mix(p, lut3(toLin(clamp(c, 0.0, 1.0)) * gain * wb, clamp(p, 0.0, 1.0)), uLutAmt);
-    pl = mix(pl, lut3(toLin(l) * gain * wb, clamp(pl, 0.0, 1.0)), uLutAmt);
-    pm = mix(pm, lut3(toLin(m) * gain * wb, clamp(pm, 0.0, 1.0)), uLutAmt);
+    p = mix(p, lut3(lc0, clamp(p, 0.0, 1.0)), uLutAmt);
+    pl = mix(pl, lut3(ll0, clamp(pl, 0.0, 1.0)), uLutAmt);
+    pm = mix(pm, lut3(lm0, clamp(pm, 0.0, 1.0)), uLutAmt);
   }
 
   // Dehaze: 안개 모델 I = J·t + A·(1 − t), 주변의 가장 어두운 채널로 t를 어림 (dark channel prior)
@@ -159,14 +240,17 @@ void main(){
   // 검정(0)과 흰색(1)은 제자리에 두는 곡선만 쓴다. 검정을 들어 올리면 검은 화소의 색 노이즈가 비율만큼 커진다.
   float L0 = max(luma(p), 1e-4), L = L0, Ll = luma(pl);
   float Lb = mix(Ll, luma(pm), ga);   // 넓은 주변 밝기, 밝은 가장자리 근처는 좁은 주변으로
-  L += uClarity * clamp(L - Lb, -0.2, 0.2) * 1.0 * (4.0 * L * (1.0 - L));
+  // 다항식 가중치는 0–1로 자른 밝기로 (노출로 1을 넘은 밝은 곳에서 음수가 되어 검게 뚫리지 않게)
+  float Lc = clamp(L, 0.0, 1.0);
+  L += uClarity * clamp(L - Lb, -0.2, 0.2) * 1.0 * (4.0 * Lc * (1.0 - Lc));
   float hm = smoothstep(0.45, 1.0, Lb), sm = 1.0 - smoothstep(0.0, 0.55, Lb);
-  L += uHighlights * 0.35 * hm * (uHighlights < 0.0 ? L : 1.0 - L);
-  L += uShadows * 0.45 * sm * (uShadows > 0.0 ? (1.0 - L) * smoothstep(0.0, 0.25, L) : L);
+  L += uHighlights * 0.35 * hm * (uHighlights < 0.0 ? L : max(1.0 - L, 0.0));
+  L += uShadows * 0.45 * sm * (uShadows > 0.0 ? max(1.0 - L, 0.0) * smoothstep(0.0, 0.25, L) : L);
   L += uWhites * 0.25 * smoothstep(0.5, 1.0, L);
   L += uBlacks * 0.2 * (1.0 - smoothstep(0.0, 0.4, L)) * (uBlacks > 0.0 ? smoothstep(0.0, 0.1, L) : 1.0);
   // 대비: L + k(L − ½)L(1 − L). k > 0은 smoothstep과 같고, k < 0은 중간 기울기를 낮추되 끝점은 고정
-  L += (uContrast > 0.0 ? 2.0 : 2.4) * uContrast * (L - 0.5) * L * (1.0 - L);
+  Lc = clamp(L, 0.0, 1.0);
+  L += (uContrast > 0.0 ? 2.0 : 2.4) * uContrast * (Lc - 0.5) * Lc * (1.0 - Lc);
   // 구간 커브 (Lightroom의 parametric curve: 하이라이트·밝은 톤·어두운 톤·섀도)
   L += 0.25 * (uRegion.x * bump(L, 0.875) + uRegion.y * bump(L, 0.625) + uRegion.z * bump(L, 0.375) + uRegion.w * bump(L, 0.125));
   L = clamp(L, 0.0, 1.2);
@@ -313,6 +397,7 @@ export class Pipeline {
     this.blur = compile(gl, VS, BLUR);
     this.copy = compile(gl, VS, COPY);
     this.prep = compile(gl, VS, PREP);
+    this.geom = compile(gl, VS, GEOM);
     this.half = !!gl.getExtension('EXT_color_buffer_float') || !!gl.getExtension('EXT_color_buffer_half_float');
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -322,6 +407,9 @@ export class Pipeline {
     this.lut = this.tex(256, 1);
     this.luts = new Map();   // 가져온 3D LUT: id → { tex, input }
     this.dummy3 = this.tex3(1, new Uint8Array([0, 0, 0]));
+    this.look = null;
+    this.toneTex = this.ftex(LUT_W, 1, gl.R32F, gl.RED, null);
+    this.hsvTex = this.ftex(1, 1, gl.RGB32F, gl.RGB, new Float32Array([0, 1, 1]));
     this.seed = Math.random() * 100;
     this.set = null;
   }
@@ -367,6 +455,53 @@ export class Pipeline {
     if (old) { this.gl.deleteTexture(old.tex); this.luts.delete(id); }
   }
 
+  /** 표본을 그대로 읽는(texelFetch) 32비트 부동소수점 표 */
+  ftex(w, h, ifmt, fmt, data) {
+    const gl = this.gl, t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, ifmt, w, h, 0, fmt, gl.FLOAT, data);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    return t;
+  }
+
+  /** RAW 카메라 룩 (camera.js fitCameraLook 결과, 없으면 null). 같은 객체면 다시 올리지 않음 */
+  setLook(look) {
+    if (look === this.look) return;
+    this.look = look || null;
+    if (!look) return;
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.toneTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, LUT_W, 1, 0, gl.RED, gl.FLOAT, toneLUT(look));
+    if (look.table) {
+      const t = look.table, d = new Float32Array(t.data.length * 3);
+      t.data.forEach((e, i) => d.set(e, i * 3));
+      gl.deleteTexture(this.hsvTex);
+      this.hsvTex = this.ftex(t.hue_divisions * t.sat_divisions, t.val_divisions, gl.RGB32F, gl.RGB, d);
+    }
+  }
+
+  /** 16비트 원본 { width, height, data: RGBA half } → GPU 텍스처 (밉맵: 줄여 그릴 때 계단 방지). 16비트 렌더가 안 되면 null */
+  hiSource(img) {
+    if (!this.half || Math.max(img.width, img.height) > this.maxTex) return null;
+    const gl = this.gl, t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    while (gl.getError() !== gl.NO_ERROR);   // 이전 오류 비우기
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, img.width, img.height, 0, gl.RGBA, gl.HALF_FLOAT, img.data);
+    let ok = gl.getError() === gl.NO_ERROR;
+    if (ok) { gl.generateMipmap(gl.TEXTURE_2D); ok = gl.getError() === gl.NO_ERROR; }
+    if (!ok) { gl.deleteTexture(t); return null; }   // 메모리 부족 등: 8비트로 편집
+    return { t, w: img.width, h: img.height };
+  }
+
+  dropHi(h) { if (h) this.gl.deleteTexture(h.t); }
+
   /** half: 흐림 단계용 16비트 부동소수점 (8비트면 그림자 계조가 끊기고 국소 분산을 못 잰다) */
   target(w, h, half) {
     const gl = this.gl, t = this.tex(w, h, null, half && this.half), fb = gl.createFramebuffer();
@@ -399,23 +534,32 @@ export class Pipeline {
   build(source, w, h, sharpRadius = 1) {
     this.free(this.set);
     const gl = this.gl, long = Math.max(w, h);
-    const src = this.tex(w, h, source);
-    const S = this.target(w, h, true), St = this.target(w, h, true);
+    // 16비트·흐림 단계는 12 MP까지 (원본 크기 내보내기는 GPU 메모리가 모자라 8비트로)
+    const hq = w * h <= 12e6;
+    let src, srcFb = null;
+    if (source && source.hiTex) {
+      const r = this.target(w, h, true);
+      this.pass(this.geom, r, [['t', source.hiTex.t]], (u) => {
+        this.gl.uniform3fv(u.uRow0, source.row0); this.gl.uniform3fv(u.uRow1, source.row1); this.gl.uniform2f(u.uOut, w, h);
+      });
+      src = r.t; srcFb = r.fb;
+    } else src = this.tex(w, h, source);
+    const S = this.target(w, h, hq), St = this.target(w, h, hq);
     this.blurInto(src, St, S, sharpRadius * long / 2048);
     let cur = { t: src, w, h };
     const chain = [];
     for (let i = 0; i < 3; i++) {
-      const nx = this.target(Math.max(1, cur.w >> 1), Math.max(1, cur.h >> 1), true);
+      const nx = this.target(Math.max(1, cur.w >> 1), Math.max(1, cur.h >> 1), hq);
       this.pass(i ? this.copy : this.prep, nx, [['t', cur.t]]);
       chain.push(nx);
       cur = nx;
     }
-    const M = this.target(chain[0].w, chain[0].h, true), Mt = this.target(chain[0].w, chain[0].h, true);
+    const M = this.target(chain[0].w, chain[0].h, hq), Mt = this.target(chain[0].w, chain[0].h, hq);
     this.blurInto(chain[0].t, Mt, M, long / 400 / 2);
-    const L = this.target(chain[2].w, chain[2].h, true), Lt = this.target(chain[2].w, chain[2].h, true);
+    const L = this.target(chain[2].w, chain[2].h, hq), Lt = this.target(chain[2].w, chain[2].h, hq);
     this.blurInto(chain[2].t, Lt, L, long / 60 / 8);
     this.blurInto(L.t, Lt, L, long / 60 / 8);
-    this.set = { src, S, St, M, Mt, L, Lt, chain, w, h, sharpRadius };
+    this.set = { src, srcFb, S, St, M, Mt, L, Lt, chain, w, h, sharpRadius };
     return this.set;
   }
 
@@ -423,6 +567,7 @@ export class Pipeline {
     if (!set) return;
     const gl = this.gl;
     gl.deleteTexture(set.src);
+    if (set.srcFb) gl.deleteFramebuffer(set.srcFb);
     for (const r of [set.S, set.St, set.M, set.Mt, set.L, set.Lt, ...set.chain]) {
       gl.deleteTexture(r.t);
       gl.deleteFramebuffer(r.fb);
@@ -458,7 +603,16 @@ export class Pipeline {
     const g3 = (z) => [z.h / 360, z.s / 100, z.l / 100];
     const L3 = st._lut ? this.luts.get(st._lut.id) : null;
     this.pass(this.main, out, [['uSrc', set.src], ['uS', set.S.t], ['uM', set.M.t], ['uL', set.L.t], ['uLut', this.lut],
-      ['uLut3', L3 ? L3.tex : this.dummy3, gl.TEXTURE_3D]], (u) => {
+      ['uLut3', L3 ? L3.tex : this.dummy3, gl.TEXTURE_3D], ['uTone', this.toneTex], ['uHsv', this.hsvTex]], (u) => {
+      const K = this.look, m3 = (n, m) => u[n] && gl.uniformMatrix3fv(u[n], true, m.flat());
+      gl.uniform1f(u.uCam, K ? 1 : 0);
+      if (K) {
+        m3('uCamM', K.matrix); m3('uToPP', TO_PROPHOTO); m3('uFromPP', FROM_PROPHOTO); m3('uTo709', REC2020_SRGB);
+        gl.uniform1f(u.uHsvOn, K.table ? 1 : 0);
+        gl.uniform1f(u.uHsvSrgb, K.table && K.table.srgb_value ? 1 : 0);
+        if (K.table) gl.uniform3f(u.uHsvDim, K.table.hue_divisions, K.table.sat_divisions, K.table.val_divisions);
+        gl.uniform1fv(u.uChroma, K.chroma);
+      }
       gl.uniform1f(u.uLutAmt, L3 ? st._lut.amount : 0);
       gl.uniform1i(u.uLutIn, L3 ? ({ srgb: 0, flog: 1, flog2: 2 })[L3.input] ?? 0 : 0);
       const f = (n, v) => u[n] && gl.uniform1f(u[n], v);

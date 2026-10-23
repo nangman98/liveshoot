@@ -29,28 +29,40 @@ export function maxCrop(r, W, H) {
  * src(이미지·캔버스)에 기하 설정을 입혀 새 캔버스로. 긴 변 maxEdge, 면적 maxArea 이하.
  * ignoreCrop이면 자르기 전 전체 틀(자르기 편집 화면용).
  */
-export function renderGeometry(src, g, maxEdge, { ignoreCrop = false, maxArea = Infinity } = {}) {
-  const sw = src.naturalWidth || src.width, sh = src.naturalHeight || src.height;
+/**
+ * 원본 sw×sh → 결과 { w, h, m }. m은 원본 화소 좌표(가운데 원점)를 결과 화소 좌표로 옮기는 DOMMatrix.
+ * size [w, h]를 주면 그 크기에 맞춘다 (16비트 원본을 8비트 미리보기와 같은 크기로 그릴 때).
+ */
+export function geomPlan(sw, sh, g, maxEdge, { ignoreCrop = false, maxArea = Infinity, size = null } = {}) {
   const [W, H] = frameSize(sw, sh, g);
   const th = (g.angle || 0) * Math.PI / 180, c = Math.abs(Math.cos(th)), s = Math.abs(Math.sin(th));
   const cover = Math.max((W * c + H * s) / W, (W * s + H * c) / H);
   const cr = (!ignoreCrop && g.crop) || { x: 0, y: 0, w: 1, h: 1 };
   const ow = W * cr.w, oh = H * cr.h;
-  const k = Math.min(1, maxEdge / Math.max(ow, oh), Math.sqrt(maxArea / (ow * oh)));
+  const k = size ? size[0] / ow : Math.min(1, maxEdge / Math.max(ow, oh), Math.sqrt(maxArea / (ow * oh)));
+  const w = size ? size[0] : Math.max(1, Math.round(ow * k)), h = size ? size[1] : Math.max(1, Math.round(oh * k));
+  const m = new DOMMatrix().scale(k, k).translate(-cr.x * W, -cr.y * H).translate(W / 2, H / 2)
+    .rotate(th * 180 / Math.PI).scale(cover, cover).rotate(g.rotate).scale(g.flip ? -1 : 1, 1);
+  return { w, h, m };
+}
+
+export function renderGeometry(src, g, maxEdge, opts = {}) {
+  const sw = src.naturalWidth || src.width, sh = src.naturalHeight || src.height;
+  const { w, h, m } = geomPlan(sw, sh, g, maxEdge, opts);
   const cv = document.createElement('canvas');
-  cv.width = Math.max(1, Math.round(ow * k));
-  cv.height = Math.max(1, Math.round(oh * k));
+  cv.width = w;
+  cv.height = h;
   const x = cv.getContext('2d');
   x.imageSmoothingQuality = 'high';
-  x.scale(k, k);
-  x.translate(-cr.x * W, -cr.y * H);
-  x.translate(W / 2, H / 2);
-  x.rotate(th);
-  x.scale(cover, cover);
-  x.rotate(g.rotate * Math.PI / 180);
-  x.scale(g.flip ? -1 : 1, 1);
+  x.setTransform(m);
   x.drawImage(src, -sw / 2, -sh / 2, sw, sh);
   return cv;
+}
+
+/** 16비트 원본용: 결과 화소 → 원본 uv(0–1, 위쪽이 0)로 가는 두 줄 [a, b, c] (geomPlan의 역변환) */
+export function geomRows(sw, sh, plan) {
+  const v = plan.m.inverse();
+  return { row0: [v.a / sw, v.c / sw, (v.e + sw / 2) / sw], row1: [v.b / sh, v.d / sh, (v.f + sh / 2) / sh] };
 }
 
 /** 자르기 편집 틀: 화면의 캔버스 위에 사각형을 띄우고 끌어서 옮기기·모서리로 크기 바꾸기 */
