@@ -23,3 +23,5 @@ jobs:
           xcodebuild -list
           xcodebuild -scheme LiveShoot -destination 'generic/platform=iOS' \
             -derivedDataPath "$RUNNER_TEMP/dd" CODE_SIGNING_ALLOWED=NO build 2>&1 | tail -60
+      - name: Show permission strings in the built Info.plist
+        run: plutil -p "$RUNNER_TEMP/dd/Build/Products/Debug-iphoneos/LiveShoot.app/Info.plist" | grep -E 'UsageDescription|CFBundleShortVersionString'
