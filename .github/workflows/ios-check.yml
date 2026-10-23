@@ -16,3 +16,10 @@ jobs:
           xcrun swiftc -typecheck -parse-as-library -swift-version 5 \
             -sdk "$SDK" -target arm64-apple-ios16.0 \
             $(ls *.swift | grep -v '^Package.swift$')
+      - name: Build the app package for iOS (no signing)
+        working-directory: LiveShoot.swiftpm
+        run: |
+          set -o pipefail
+          xcodebuild -list
+          xcodebuild -scheme LiveShoot -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/dd" CODE_SIGNING_ALLOWED=NO build 2>&1 | tail -60
