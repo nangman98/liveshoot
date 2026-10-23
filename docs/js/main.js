@@ -5,7 +5,7 @@ import { renderGeometry, frameSize, aspectRatio, maxCrop, CropBox, ASPECTS } fro
 import { readExif } from './exif.js';
 import { isRaw, decodeRaw, rawInfo } from './raw.js';
 import { PROFILES, PROFILE_GROUPS, profileById } from './profiles.js';
-import { parseLUTFile, guessInput, INPUTS } from './lut.js';
+import { parseLUTFile, INPUTS } from './lut.js';
 
 // 가져온 LUT 목록 (표 자체는 IndexedDB 'lut:<id>', 목록은 localStorage)
 const lutMeta = () => JSON.parse(localStorage.getItem('ls.luts') || '[]');
@@ -13,7 +13,7 @@ const saveLutMeta = (l) => localStorage.setItem('ls.luts', JSON.stringify(l));
 const allProfiles = () => [...PROFILES, ...lutMeta().map((l) => ({ id: 'lut:' + l.id, name: l.name, ko: 'LUT', group: 'lut' }))];
 import { loadImage, toCanvas, renderJPEG, download, canShareFiles, driveConfig, saveDriveConfig, driveToken, pickDriveFolder, uploadToDrive } from './export.js';
 
-export const VERSION = 'v7';
+export const VERSION = 'v8';
 const PREVIEW = 2048;   // 화면용 긴 변 (px)
 const BASE = 3072;      // 자르기·회전 전에 읽어 두는 원본 (긴 변 px)
 
@@ -435,9 +435,11 @@ function lutGroup() {
   box.append(sm);
   box.addEventListener('toggle', () => { if (box.open) scheduleThumbs(); });
   const grid = el('div', 'profiles'), list = el('div', null);
-  const imp = el('label', 'btn', 'LUT 가져오기 (.cube, HaldCLUT .png)');
+  const imp = el('label', 'btn', 'LUT 가져오기 (.cube, HaldCLUT .png, 묶음 .lsluts)');
   const fi = el('input');
-  Object.assign(fi, { type: 'file', accept: '.cube,.png', multiple: true, hidden: true });
+  // accept를 두지 않음: iPad는 iOS가 모르는 확장자(.cube·.lsluts)를 흐리게 해서 못 고르게 함. 형식은 parseLUTFile이 거름
+  Object.assign(fi, { type: 'file', multiple: true, hidden: true });
+  fi.dataset.role = 'lut-import';
   imp.append(fi);
   const redraw = () => {
     grid.replaceChildren();
@@ -480,13 +482,14 @@ function lutGroup() {
   fi.onchange = async () => {
     for (const f of fi.files) {
       try {
-        const r = await parseLUTFile(f);
-        const id = crypto.randomUUID(), name = (r.title || f.name.replace(/\.[^.]+$/, '')).slice(0, 40);
-        const input = guessInput(f.name + ' ' + (r.title || ''));
-        await store.putBlob('lut:' + id, r.data);
-        saveLutMeta([...lutMeta(), { id, name, input }]);
-        app.pipe.setLUT(id, r.data, input);
-        toast(`LUT 가져옴: ${name} (입력 ${input})`);
+        const items = await parseLUTFile(f);
+        for (const { name, input, data } of items) {
+          const id = crypto.randomUUID();
+          await store.putBlob('lut:' + id, data);
+          saveLutMeta([...lutMeta(), { id, name, input }]);
+          app.pipe.setLUT(id, data, input);
+        }
+        toast(items.length > 1 ? `LUT ${items.length}개 가져옴: ${f.name}` : `LUT 가져옴: ${items[0].name} (입력 ${items[0].input})`);
       } catch (e) {
         toast(`LUT를 못 읽음: ${f.name} (${e.message})`);
       }

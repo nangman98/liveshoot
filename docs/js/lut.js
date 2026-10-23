@@ -64,8 +64,28 @@ export async function parseHald(blob) {
   return { data: resample(src, N) };
 }
 
+/** LiveShoot LUT 묶음(.lsluts): gzip JSON { format: 'liveshoot-luts', size: 64, luts: [{ name, input, data(base64) }] } */
+export async function parseBundle(file) {
+  const head = new Uint8Array(await file.slice(0, 2).arrayBuffer());
+  const stream = head[0] === 0x1f && head[1] === 0x8b ? file.stream().pipeThrough(new DecompressionStream('gzip')) : file.stream();
+  const j = JSON.parse(await new Response(stream).text());
+  if (j.format !== 'liveshoot-luts' || j.size !== LUT_SIZE) throw new Error('LiveShoot LUT 묶음이 아님');
+  return j.luts.map((l) => {
+    const bin = atob(l.data), data = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) data[i] = bin.charCodeAt(i);
+    if (data.length !== LUT_SIZE ** 3 * 3) throw new Error(`묶음 안 LUT 크기가 맞지 않음: ${l.name}`);
+    return { name: l.name, input: l.input, data };
+  });
+}
+
+/** 파일 하나 → [{ name, input, data }] (.cube·.png는 1개, .lsluts는 여러 개) */
 export async function parseLUTFile(file) {
-  if (/\.cube$/i.test(file.name)) return parseCube(await file.text());
-  if (/\.png$/i.test(file.name)) return parseHald(file);
-  throw new Error('.cube 또는 HaldCLUT .png만 가져올 수 있음');
+  const stem = file.name.replace(/\.[^.]+$/, '');
+  if (/\.lsluts$/i.test(file.name)) return parseBundle(file);
+  if (/\.cube$/i.test(file.name)) {
+    const r = parseCube(await file.text());
+    return [{ name: (r.title || stem).slice(0, 40), input: guessInput(file.name + ' ' + (r.title || '')), data: r.data }];
+  }
+  if (/\.png$/i.test(file.name)) return [{ name: stem.slice(0, 40), input: 'srgb', data: (await parseHald(file)).data }];
+  throw new Error('.cube, HaldCLUT .png, .lsluts만 가져올 수 있음');
 }
