@@ -1,79 +1,134 @@
-# LiveShoot: iPad 실시간 받기·보정
+<p align="center">
+  <img src="docs/icons/icon-512.png" width="112" height="112" alt="LiveShoot 아이콘: 주황 바탕의 렌즈와 실시간 점">
+</p>
 
-**a7 IV(FTP), GR III(Wi-Fi), 사진 보관함으로 들어온 JPG를 받는 즉시 원본 기준으로 보정해 띄우고 그 자리에서 슬라이더로 고쳐 홈페이지 크기(긴 변 2400 px, 품질 85)로 내보내는 iPad 앱(0.3, Swift Playgrounds 프로젝트).** 0.3에서 이미 있는 사진을 보관함·파일 앱(Google Drive 포함)에서 골라 가져오는 기능을 넣음. 2026-10-23 GitHub Actions에서 iOS 빌드가 성공함(Xcode 16.4, iOS SDK 18.5, `** BUILD SUCCEEDED **`). 받기와 보정 계산은 Mac에서 실측함(아래 시험 결과). iPad 실기기와 실제 카메라로는 아직 돌려 보지 않음.
+<h1 align="center">LiveShoot</h1>
+
+<h3 align="center">찍는 즉시 iPad에서 보정해 보여 주는 촬영 현장 도구</h3>
+
+<p align="center">
+  <b>사진을 원본 기준으로 실시간 보정하는 웹 편집기와, Sony a7 IV(FTP)·Ricoh GR III(Wi-Fi)에서 사진을 받는 iPad 앱.</b><br>
+  설치 없이 Safari에서 열어 홈 화면에 추가하면 앱처럼 씀. 고칠 때마다 다시 받을 필요가 없음.
+</p>
+
+<p align="center">
+  <a href="https://nangman98.github.io/liveshoot/"><img alt="웹 편집기 열기" src="https://img.shields.io/badge/웹_편집기-열기-f08c2e?style=flat-square"></a>
+  <img alt="iPadOS 16+" src="https://img.shields.io/badge/iPadOS-16%2B-555?style=flat-square&logo=apple">
+  <img alt="WebGL2" src="https://img.shields.io/badge/WebGL2-GPU_보정-555?style=flat-square">
+  <a href="https://github.com/nangman98/liveshoot/actions/workflows/ios-check.yml"><img alt="iOS build check" src="https://img.shields.io/github/actions/workflow/status/nangman98/liveshoot/ios-check.yml?style=flat-square&label=iOS%20build"></a>
+  <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-555?style=flat-square">
+</p>
+
+<p align="center">
+  <a href="#기능">기능</a> ·
+  <a href="#설치">설치</a> ·
+  <a href="#카메라-연결">카메라 연결</a> ·
+  <a href="#내보내기">내보내기</a> ·
+  <a href="#구성">구성</a> ·
+  <a href="#시험-결과">시험 결과</a>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/editor.jpg" alt="LiveShoot 웹 편집기: 큰 사진, 필름 띠, 오른쪽 보정 패널(히스토그램, Light, Curve)" width="100%">
+  <br>
+  <sub><i>웹 편집기 가로 화면 (노출 +0.5 EV, 색온도 +30, 대비 +20, Vignette −40). 사진은 LightCraft 예시 라이브러리.</i></sub>
+</p>
+
+## 기능
+
+**슬라이더를 움직이면 원본(화면용 긴 변 2048 px)에 처음부터 다시 입혀 바로 보여 줌.** 계산은 iPad GPU(WebGL2)에서 하고 사진은 iPad 밖으로 나가지 않음.
+
+| 패널 | 들어 있는 것 |
+|---|---|
+| Light | 노출 ±5 EV, 대비, 하이라이트, 섀도, Whites, Blacks, 자동 노출 |
+| Curve | 점 커브 RGB·R·G·B, Refine Saturation |
+| Color | 화이트밸런스 스포이트, 색온도, 색조, Vibrance(피부색 보호), 채도 |
+| Color Mixer | 8색(빨강·주황·노랑·초록·아쿠아·파랑·보라·마젠타) Hue·Saturation·Luminance |
+| Point Color | 스포이트로 고른 색만 Hue·Saturation·Luminance, 범위 |
+| Color Grading | 섀도·미드톤·하이라이트·전체 Hue·Saturation·Luminance, Blending, Balance |
+| Effects | Texture, Clarity, Dehaze, Vignette(Midpoint·Feather·Roundness·Highlights), Grain(Size·Roughness) |
+| Detail | Sharpening(Radius·Detail·Masking), Noise Reduction(Detail·Contrast), Color Noise Reduction(Detail·Smoothness) |
+| 기본 | 히스토그램, 보정 복사·붙여넣기, 프리셋, 새 사진 기본 보정, 새 사진에 이어 쓰기 |
+| 보기 | 누르고 있으면 원본, 하트(두 번 누르기), 좌우로 넘기기, 고객 보기(사진만) |
+
+- **초기화**: 슬라이더를 두 번 누르면 그 값만, 패널 제목의 "초기화"는 그 패널 전체
+- **자동 노출**: 64 px로 줄인 그림의 log 평균 휘도를 중간 회색(선형 0.18)에 맞추는 EV(±2.5)를 출발점으로 넣음
+- **보관**: 가져온 원본과 보정값은 iPad 브라우저(IndexedDB)에 남아 다시 열어도 그대로임
+
+<p align="center">
+  <img src="docs/screenshots/client.jpg" alt="고객 보기: 버튼 없이 사진만 크게" width="49%">
+  <img src="docs/screenshots/portrait.jpg" alt="세로 화면: 사진 아래 보정 패널" width="35%">
+  <br>
+  <sub><i>왼쪽: 고객 보기(오른쪽 위 ✕ 또는 1초 길게 눌러 돌아옴). 오른쪽: 세로 화면.</i></sub>
+</p>
+
+## 설치
+
+| 무엇 | 어떻게 | 업데이트 |
+|---|---|---|
+| **웹 편집기** | iPad Safari로 [nangman98.github.io/liveshoot](https://nangman98.github.io/liveshoot/) 열기 → 공유 버튼 → **홈 화면에 추가** | 자동. 앱을 한두 번 껐다 켜면 새 판으로 바뀜 |
+| **받기 앱** (카메라 실시간) | Swift Playgrounds로 `LiveShoot.swiftpm` 열고 ▶. 자세히는 [받기 앱 README](LiveShoot.swiftpm/README.md) | 받는 방식이 바뀔 때만 다시 설치 |
+
+웹 편집기만으로도 "사진 가져오기"를 눌러 보관함·파일 앱(Google Drive, SD 카드 리더 포함)의 사진을 여러 장 골라 보정할 수 있음.
+
+## 카메라 연결
+
+| 카메라 | 무선 | 유선 |
+|---|---|---|
+| Sony a7 IV | 카메라 FTP 전송 → 받기 앱의 FTP 서버(포트 2121, 수동 모드). 카메라와 iPad를 같은 Wi-Fi(휴대폰 핫스팟·여행용 공유기)에 연결 | USB-C 이더넷 어댑터로 같은 공유기에 연결하면 같은 FTP로 받음([Sony](https://www.sony.ca/en/interchangeable-lens-cameras/products/ilce-7m4/feature5)). 케이블 한 줄 연결 촬영은 iPadOS 지원이 불확실함 |
+| Ricoh GR III | iPad를 GR Wi-Fi에 연결하면 받기 앱이 2초마다 새 JPG를 가져옴(비공식 `GET /v1/photos`, [GRsync](https://github.com/metalunk/GRsync) 방식) | 연결 촬영 기능 없음. 촬영 뒤 카드·케이블로 가져오기 |
+
+## 내보내기
+
+**원본에서 다시 그려 JPEG로 만듦. 기본은 홈페이지와 같은 긴 변 2400 px, 품질 85.** 3000, 4000, 원본 크기(iPad Safari 한도 약 16 MP 안쪽)도 고를 수 있음.
+
+| 보낼 곳 | 내용 |
+|---|---|
+| 공유 시트 | 사진 보관함 저장, 파일 앱의 원하는 폴더(Google Drive 폴더 포함), AirDrop |
+| 다운로드 | 파일 앱의 다운로드 폴더 |
+| Google Drive 지정 폴더 | 한 번 고른 Drive 폴더로 바로 올림. 아래 설정이 한 번 필요함 |
+
+### Google Drive 직접 올리기 설정
+
+1. [Google Cloud 콘솔](https://console.cloud.google.com/)에서 새 프로젝트를 만듦
+2. "API 및 서비스 → 라이브러리"에서 **Google Drive API**와 **Google Picker API**를 사용 설정함
+3. "OAuth 동의 화면"을 외부로 만들고 테스트 사용자에 본인 Gmail을 넣음
+4. "사용자 인증 정보 → OAuth 클라이언트 ID"를 웹 애플리케이션으로 만들고 승인된 JavaScript 원본에 `https://nangman98.github.io`를 넣음
+5. "사용자 인증 정보 → API 키"를 만들고 HTTP 리퍼러를 `https://nangman98.github.io/*`로 제한함
+6. 대시보드의 **프로젝트 번호**를 확인함
+7. 편집기 "내보내기 → 보낼 곳: Google Drive 지정 폴더"에 클라이언트 ID, API 키, 프로젝트 번호를 넣고 "Drive 폴더 고르기"를 누름
+
+권한은 `drive.file`만 씀. 고른 폴더와 앱이 올린 파일에만 접근함.
 
 ## 구성
 
 ![LiveShoot 구성도](docs/architecture.svg)
 
-- **지금 (0.3)**: 받기와 보정이 앱 하나에 들어 있음. 보정은 노출, 대비, 하이라이트, 섀도, 색온도, 색조, Vibrance, 채도 8개
-- **다음**: 보정 화면을 웹 편집기(GitHub Pages)로 옮기고 Curve, Color Mixer, Point Color, Color Grading, Effects, Detail을 넣음. 받기 앱은 받은 사진을 편집기로 넘기는 일만 해서 다시 설치할 일이 거의 없음
-- **Mac mini와의 관계**: 원본 RAW 본보정은 별도 저장소 `lightcraft-batch`(비공개, LightCraft CLI)가 맡음. LiveShoot의 보정값은 Mac mini로 넘어가지 않음
-
-## 파일
-
-| 파일 | 내용 |
-|---|---|
-| `LiveShoot.swiftpm/Views.swift` | 화면: 큰 사진, 필름 띠, 받기·보정·내보내기 패널, 고객 보기 |
-| `LiveShoot.swiftpm/Session.swift` | 사진 목록, 받기 켜고 끄기, 미리보기 캐시, 내보내기, 저장·복원 |
-| `LiveShoot.swiftpm/Renderer.swift` | 자동 노출과 보정 8가지 (Core Image), JPEG 내보내기 |
-| `LiveShoot.swiftpm/FTPServer.swift` | a7 IV FTP 전송을 받는 FTP 서버 (수동 모드) |
-| `LiveShoot.swiftpm/GRClient.swift` | GR III Wi-Fi에서 새 JPG를 2초마다 가져옴 |
-| `.github/workflows/ios-check.yml` | push마다 iOS SDK 문법 검사와 앱 빌드 |
-
-## 받기
-
-| 입력 | 카메라와 iPad 설정 | 앱 |
-|---|---|---|
-| a7 IV | 카메라 FTP 전송: 서버 = 앱에 뜬 iPad 주소, 포트 2121, 사용자·비밀번호 `liveshoot`, 수동(PASV) 모드 켬, 보안 프로토콜 끔, 자동 전송 켬, 전송 파일 JPEG. 카메라와 iPad를 같은 Wi-Fi(휴대폰 핫스팟 등)에 연결 | "a7 IV (FTP)" 켬 |
-| GR III | 카메라 무선 LAN을 켜고 iPad 설정 → Wi-Fi에서 GR 네트워크에 접속 | "GR III (Wi-Fi)" 켬. 켠 뒤 찍은 JPG만 받음 |
-| 그 밖 (새 사진) | Creators' App, GR WORLD, AirDrop, 케이블 가져오기로 사진 보관함에 들어온 사진 | "사진 보관함 (새 사진)" 켬 |
-| 이미 있는 사진 | iPad 보관함, 파일 앱(Google Drive, SD 카드 리더 포함) | "보관함에서" 또는 "파일에서"로 여러 장 고름 |
-
-- **GR III 방식**: 리코가 공개한 API가 아니라 GRsync가 쓰는 `GET http://192.168.0.1/v1/photos` 목록과 `/v1/photos/<폴더>/<파일>` 받기를 씀([GRsync](https://github.com/metalunk/GRsync)). 펌웨어가 바뀌면 안 될 수 있음
-- **두 카메라 동시**: iPad가 GR Wi-Fi에 붙으면 a7 IV와 같은 Wi-Fi가 아니게 되어 a7 IV FTP는 끊김. a7 IV를 GR Wi-Fi에 붙이면 둘 다 될 수도 있지만 시험 전임 [잠정]
-- **카메라 메뉴 이름**: 위 a7 IV 설정 이름은 Sony 기능 설명([Sony](https://www.sony.ca/en/interchangeable-lens-cameras/products/ilce-7m4/feature5)) 기준이고 실제 메뉴 문구는 펌웨어마다 다를 수 있음
-
-## 보정
-
-- **원본 기준**: 슬라이더를 움직일 때마다 원본(화면용은 긴 변 2560 px)에 처음부터 다시 입힘. "누르고 있으면 원본"으로 보정 전을 봄
-- **자동 노출**: 사진마다 64 px로 줄인 그림의 log 평균 휘도를 중간 회색(선형 0.18)에 맞추는 EV를 출발점으로 넣음(±2.5 EV). 끄거나 노출 슬라이더로 더하고 뺄 수 있음
-- **슬라이더 8개**: 노출 ±3 EV, 대비·하이라이트·섀도·색온도·색조·Vibrance·채도 ±100. 슬라이더를 두 번 누르면 0
-- **새 사진의 출발점**: "기본으로 저장"한 값이 새 사진에 들어감. "새 사진에 이 보정 이어 쓰기"를 켜면 지금 보던 사진의 값을 이어 씀
-- **하트**: 사진을 두 번 누르거나 하트를 누름. 사진 보관함에서 온 사진은 보관함 즐겨찾기도 같이 바뀜
-
-## 내보내기
-
-- **기본**: 긴 변 2400 px, JPEG 품질 85. `memory-photos/scripts/optimize-photos.mjs`의 `MAX_EDGE = 2400`, quality 85와 같음
-- **선택**: 3000, 4000, 원본 크기, 품질 60–100
-- **저장 위치**: 사진 보관함의 "LiveShoot" 앨범. 원본은 그대로임
-- **유지**: 받은 원본과 보정값은 앱을 껐다 켜도 남음. "받은 사진 목록 비우기"로 지움
-
-## iPad에 설치
-
-1. App Store에서 Swift Playgrounds를 설치함
-2. 파일 앱 → Google Drive → `project/AI도구_사용법/아이패드_라이브뷰어/LiveShoot.swiftpm.zip`을 눌러 풂
-3. 풀린 `LiveShoot.swiftpm`을 Swift Playgrounds에서 열고 ▶를 누름. 사진 보관함과 로컬 네트워크 접근을 허용함
-4. 빌드 오류나 이상한 동작은 화면을 캡처해 Claude에게 보여 줌
+- **웹 편집기** (`docs/`): GitHub Pages로 배포. `docs/sw.js`의 `VERSION`(= `docs/js/main.js`의 `VERSION`)을 올려 push하면 기기에 새 판이 들어감
+- **받기 앱** (`LiveShoot.swiftpm/`): a7 IV FTP, GR III Wi-Fi, 사진 보관함에서 받음. 지금(0.3)은 자체 보정 8개를 가진 따로 된 앱임. 받은 사진을 웹 편집기로 넘기는 연결은 다음 판에서 넣음
+- **Mac mini 본보정**: 원본 RAW는 별도 저장소 `lightcraft-batch`(비공개, LightCraft CLI)가 맡음. LiveShoot 보정값은 넘어가지 않음
 
 ## 시험 결과
 
-Mac(M4)에서 앱의 `Renderer`·`FTPServer`·`GRClient` 코드를 그대로 컴파일해 돌림(2026-10-23).
+2026-10-23 Mac의 Chrome(헤드리스, 1366 × 1024)에서 웹 편집기를 자동으로 조작해 잼. iPad Safari 실기기 시험은 아직 안 함.
 
 | 시험 | 결과 |
 |---|---|
-| FTP 받기 | Python `ftplib` 수동 모드로 JPG 2장 올림 → 둘 다 `226 Transfer complete`, 원본과 바이트 단위로 같음 |
-| GR 받기 | GR처럼 응답하는 가짜 서버 → 연결 때 있던 1장은 건너뛰고 3초 뒤 새로 생긴 1장만 받음, 바이트 단위로 같음 |
-| 자동 노출 | 노출 −1.5로 어둡게 만든 사진 +1.34 EV(밝기 87.7 → 136.0), +1.2로 밝게 만든 사진 −0.68 EV(170.2 → 137.5) |
-| 슬라이더 1번 반영 | 2400 × 1600에서 5–19 ms |
-| 색 방향 | 색온도 +50 → R−B 20.6 → 51.3 (따뜻함), 색조 +50 → G 155.4 → 147.6 (자주) |
-| 내보내기 | 2400 × 1600, 품질 85, 370 KB |
+| 보정 방향 30가지 | 30/30 통과. 예: 노출 +1 EV 밝기 146 → 193, 색온도 +50 R−B 16.1 → 36.0, 채도 −100 채도 0.18 → 0.00, Vignette −80 모서리 151 → 30 (가운데 142 그대로), Color NR 80 색 노이즈 244 → 24.7 |
+| 미리보기와 내보내기 | 밝기 143 / 143, R−B 18.33 / 18.21, 모서리 109 / 109 (2400 × 1600, 253 KB) |
+| 자동 노출 | 노출 −1.5로 어둡게 만든 사진 +1.38 EV, 밝기 80.5 → 127 |
+| 조작 | 커브 점 추가, 슬라이더 두 번 눌러 초기화(대비 55 → 0), 새로고침 뒤 보정값 유지, 고객 보기 |
+| 브라우저 오류 | 0건 |
 
-밝기는 sRGB Rec. 601 luma 평균(0–255).
+밝기는 Rec. 601 luma 평균(0–255), 채도는 HSV S 평균, 색 노이즈는 R−B 채널 Laplacian 분산.
 
 ## Still open
 
-- **야경**: 자동 노출이 야경을 너무 밝게 잡음(+1.62 EV, 밝기 106.6 → 178.8). 화면에서 노출을 내리거나 자동 노출을 끔
-- **iPad 실기기**: Swift Playgrounds 빌드, 권한 창, FTP 받기(a7 IV 실기), GR III 실기 응답 형식은 아직 확인 못 함
-- **RAW**: DNG·ARW·CR3 등은 iPadOS가 읽을 수 있으면 띄움. 실기기에서 확인 전임 [잠정]. 실시간은 JPEG 전송을 씀
-- **FTP 계정**: 기본 계정 `liveshoot`/`liveshoot`은 코드에 공개됨. 같은 Wi-Fi의 다른 사람도 이 계정으로 올릴 수 있음. 다음 판에서 비밀번호를 바꿀 수 있게 함
+- **iPad Safari 실기기**: WebGL2, HEIC 읽기, 공유 시트, 홈 화면 앱 동작 확인 전
+- **Google Drive 직접 올리기**: OAuth 설정 뒤 실제 올리기 확인 전
+- **받기 앱 → 웹 편집기 연결**: 다음 판
+- **RAW**: 브라우저가 ARW·CR3·RAF를 읽지 못해 웹 편집기는 JPG·HEIC·PNG만 씀. RAW는 Mac mini에서 보정
+
+## 라이선스
+
+MIT 또는 Apache-2.0 가운데 골라 씀: [LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE).

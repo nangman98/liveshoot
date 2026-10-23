@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="LiveShoot">
+  <meta name="theme-color" content="#111113">
+  <title>LiveShoot</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header id="top">
+    <div class="brand"><img src="icons/icon.svg" alt=""><b>LiveShoot</b></div>
+    <span id="count" class="muted"></span>
+    <label class="btn primary">사진 가져오기<input id="file" type="file" accept="image/*,.heic,.heif" multiple hidden></label>
+    <label class="chk"><input id="follow" type="checkbox"><span>새 사진 따라가기</span></label>
+    <span class="grow"></span>
+    <button id="clientBtn" class="btn">고객 보기</button>
+  </header>
+  <main>
+    <section id="stage">
+      <div id="viewer">
+        <canvas id="gl"></canvas>
+        <div id="empty">'사진 가져오기'로 보관함·파일 앱(Google Drive 포함)에서 사진을 고르거나, 여기에 끌어다 놓으세요</div>
+        <div id="hud">
+          <span id="photoName"></span>
+          <span class="grow"></span>
+          <button id="beforeBtn" class="pill">누르고 있으면 원본</button>
+          <button id="heart" class="heart">♡</button>
+        </div>
+        <button id="exitClient" class="exit" aria-label="고객 보기 끝내기">✕</button>
+      </div>
+      <div id="strip"></div>
+    </section>
+    <aside id="panel"></aside>
+  </main>
+  <div id="toast"></div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
