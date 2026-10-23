@@ -5,9 +5,15 @@ import { renderGeometry, frameSize, aspectRatio, maxCrop, CropBox, ASPECTS } fro
 import { readExif } from './exif.js';
 import { isRaw, decodeRaw, rawInfo } from './raw.js';
 import { PROFILES, PROFILE_GROUPS, profileById } from './profiles.js';
+import { parseLUTFile, guessInput, INPUTS } from './lut.js';
+
+// 가져온 LUT 목록 (표 자체는 IndexedDB 'lut:<id>', 목록은 localStorage)
+const lutMeta = () => JSON.parse(localStorage.getItem('ls.luts') || '[]');
+const saveLutMeta = (l) => localStorage.setItem('ls.luts', JSON.stringify(l));
+const allProfiles = () => [...PROFILES, ...lutMeta().map((l) => ({ id: 'lut:' + l.id, name: l.name, ko: 'LUT', group: 'lut' }))];
 import { loadImage, toCanvas, renderJPEG, download, canShareFiles, driveConfig, saveDriveConfig, driveToken, pickDriveFolder, uploadToDrive } from './export.js';
 
-export const VERSION = 'v6';
+export const VERSION = 'v7';
 const PREVIEW = 2048;   // 화면용 긴 변 (px)
 const BASE = 3072;      // 자르기·회전 전에 읽어 두는 원본 (긴 변 px)
 
@@ -87,10 +93,17 @@ let thumbTimer;
 function scheduleThumbs() { clearTimeout(thumbTimer); thumbTimer = setTimeout(updateProfileThumbs, 600); }
 function updateProfileThumbs() {
   if (!app.cur || !app.preview || !app.profileCells) return;
-  const src = toCanvas(app.preview, 180);
-  const list = PROFILES.map((p) => ({ ...clone(app.cur.settings), profile: { id: p.id, amount: 100 } }));
-  const cs = app.pipe.renderMany(src, src.width, src.height, list, app.cur.autoEV);
-  PROFILES.forEach((p, i) => { const cell = app.profileCells[p.id]; cell.querySelector('canvas')?.remove(); cell.prepend(cs[i]); });
+  // 펼친 묶음에 있는 프로필만
+  const open = allProfiles().filter((p) => app.profileCells[p.id]?.closest('details.pgroup')?.open);
+  if (!open.length) return;
+  try {
+    const src = toCanvas(app.preview, 180);
+    const list = open.map((p) => ({ ...clone(app.cur.settings), profile: { id: p.id, amount: 100 } }));
+    const cs = app.pipe.renderMany(src, src.width, src.height, list, app.cur.autoEV);
+    open.forEach((p, i) => { const cell = app.profileCells[p.id]; cell.querySelector('canvas')?.remove(); cell.prepend(cs[i]); });
+  } catch (e) {
+    toast('썸네일 오류: ' + (e && e.message));
+  }
 }
 
 /**
@@ -415,6 +428,79 @@ function adopt(st) {
   app.cur.settings.geometry = g;
 }
 
+/** "내 LUT" 묶음: .cube·HaldCLUT 가져오기, 입력 방식, 지우기 */
+function lutGroup() {
+  const box = el('details', 'pgroup'), sm = el('summary', null), cnt = el('span', 'muted');
+  sm.append(el('span', null, '내 LUT'), cnt);
+  box.append(sm);
+  box.addEventListener('toggle', () => { if (box.open) scheduleThumbs(); });
+  const grid = el('div', 'profiles'), list = el('div', null);
+  const imp = el('label', 'btn', 'LUT 가져오기 (.cube, HaldCLUT .png)');
+  const fi = el('input');
+  Object.assign(fi, { type: 'file', accept: '.cube,.png', multiple: true, hidden: true });
+  imp.append(fi);
+  const redraw = () => {
+    grid.replaceChildren();
+    list.replaceChildren();
+    for (const k of Object.keys(app.profileCells)) if (k.startsWith('lut:')) delete app.profileCells[k];
+    const m = lutMeta();
+    cnt.textContent = String(m.length);
+    for (const l of m) {
+      const cell = el('button', 'prof');
+      cell.append(el('span', null, l.name));
+      cell.onclick = () => { if (!app.cur) return; app.cur.settings.profile.id = 'lut:' + l.id; syncAll(); changed(); };
+      app.profileCells['lut:' + l.id] = cell;
+      grid.append(cell);
+      const row = el('div', 'btnrow'), s = el('select');
+      for (const [v, t] of INPUTS) { const o = el('option', null, t); o.value = v; s.append(o); }
+      s.value = l.input;
+      s.onchange = () => {
+        const mm = lutMeta();
+        mm.find((y) => y.id === l.id).input = s.value;
+        saveLutMeta(mm);
+        const L = app.pipe.luts.get(l.id);
+        if (L) L.input = s.value;
+        changed();
+      };
+      const del = el('button', 'btn danger', '지우기');
+      del.onclick = async () => {
+        if (!confirm(`LUT '${l.name}'을 지울까요?`)) return;
+        saveLutMeta(lutMeta().filter((y) => y.id !== l.id));
+        await store.delBlob('lut:' + l.id);
+        app.pipe.dropLUT(l.id);
+        if (app.cur && app.cur.settings.profile.id === 'lut:' + l.id) app.cur.settings.profile.id = 'color';
+        redraw();
+        changed();
+      };
+      row.append(el('span', null, l.name), s, del);
+      list.append(row);
+    }
+    if (app.pipe) syncAll();
+  };
+  fi.onchange = async () => {
+    for (const f of fi.files) {
+      try {
+        const r = await parseLUTFile(f);
+        const id = crypto.randomUUID(), name = (r.title || f.name.replace(/\.[^.]+$/, '')).slice(0, 40);
+        const input = guessInput(f.name + ' ' + (r.title || ''));
+        await store.putBlob('lut:' + id, r.data);
+        saveLutMeta([...lutMeta(), { id, name, input }]);
+        app.pipe.setLUT(id, r.data, input);
+        toast(`LUT 가져옴: ${name} (입력 ${input})`);
+      } catch (e) {
+        toast(`LUT를 못 읽음: ${f.name} (${e.message})`);
+      }
+    }
+    fi.value = '';
+    redraw();
+    box.open = true;
+    scheduleThumbs();
+  };
+  redraw();
+  box.append(grid, imp, list, el('div', 'hint', 'LUT 파일은 이 기기 브라우저 안에만 저장됨. 후지 공식 LUT(F-Log2 to …)는 입력을 F-Log2로 둠. 노출·화이트밸런스 바로 뒤에 입혀짐'));
+  return box;
+}
+
 function buildPanel() {
   const P = $('#panel');
 
@@ -483,14 +569,23 @@ function buildPanel() {
   // 프로필
   const curName = el('div', 'subhead');
   app.syncers.push(() => {
-    const p = profileById(app.cur?.settings.profile.id);
+    const id = app.cur?.settings.profile.id;
+    const p = allProfiles().find((x) => x.id === id) || profileById('color');
     curName.textContent = `${p.name} · ${p.ko}`;
     for (const [id, cell] of Object.entries(app.profileCells || {})) cell.classList.toggle('on', id === p.id);
   });
   app.profileCells = {};
+  // 묶음은 접어 두고, 펼친 묶음만 썸네일을 그린다
   const profGroups = PROFILE_GROUPS.map(([g, label]) => {
+    const box = el('details', 'pgroup');
+    const list = PROFILES.filter((x) => x.group === g);
+    const sm = el('summary', null);
+    sm.append(el('span', null, label), el('span', 'muted', String(list.length)));
+    box.append(sm);
+    box.addEventListener('toggle', () => { if (box.open) scheduleThumbs(); });
     const grid = el('div', 'profiles');
-    for (const p of PROFILES.filter((x) => x.group === g)) {
+    box.append(grid);
+    for (const p of list) {
       const cell = el('button', 'prof');
       cell.append(el('span', null, p.name));
       cell.title = p.ko;
@@ -498,12 +593,13 @@ function buildPanel() {
       app.profileCells[p.id] = cell;
       grid.append(cell);
     }
-    return [sub(label), grid];
-  }).flat();
+    return box;
+  });
   P.append(section('프로필', ['profile'], curName,
     slider({ label: '강도 Amount', path: 'profile.amount', min: 0, max: 200, fmt: (v) => Math.round(v) + ' %' }),
     ...profGroups,
-    el('div', 'hint', '썸네일은 지금 사진과 지금 보정 위에 각 프로필을 얹은 모습. 프로필은 슬라이더를 움직이지 않고 그 아래에 깔림'),
+    lutGroup(),
+    el('div', 'hint', '묶음을 누르면 펼쳐짐. 썸네일은 지금 사진과 지금 보정 위에 각 프로필을 얹은 모습. 프로필은 슬라이더를 움직이지 않고 그 아래에 깔림. Ricoh·Fujifilm 풍은 공개된 설명을 바탕으로 만든 근사이고 제조사 색과 같지 않음'),
   ));
 
   // 자르기·회전
@@ -873,11 +969,19 @@ function exitClient() {
 // ---------- 시작 ----------
 
 async function main() {
+  // 오류를 화면에 띄움 (iPad에서 캡처로 원인을 받기 위해)
+  window.addEventListener('error', (e) => toast(`오류: ${e.message} (${(e.filename || '').split('/').pop()}:${e.lineno})`));
+  window.addEventListener('unhandledrejection', (e) => toast('오류: ' + (e.reason && e.reason.message || e.reason)));
   try {
     app.pipe = new Pipeline($('#gl'));
   } catch (e) {
     $('#empty').textContent = e.message;
     return;
+  }
+  // 저장해 둔 LUT를 GPU에 올림
+  for (const l of lutMeta()) {
+    const data = await store.getBlob('lut:' + l.id);
+    if (data) app.pipe.setLUT(l.id, data, l.input);
   }
   buildPanel();
   setupViewer();

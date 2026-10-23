@@ -27,7 +27,11 @@ void main(){ o = texture(t, uv); }`;
 
 const MAIN = `#version 300 es
 precision highp float;
+precision highp sampler3D;
 in vec2 uv; out vec4 o;
+uniform sampler3D uLut3;   // 가져온 3D LUT (64³)
+uniform float uLutAmt;
+uniform int uLutIn;        // 0 sRGB, 1 F-Log, 2 F-Log2
 uniform sampler2D uSrc, uS, uM, uL, uLut;
 uniform vec2 uRes;
 uniform float uOriginal, uSeed;
@@ -70,6 +74,19 @@ float vnoise(vec2 p){
   vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
   return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y);
 }
+// 후지 F-Log·F-Log2 인코딩 (상수: colour-science fujifilm_f_log), F-Gamut = BT.2020 원색
+vec3 flogEnc(vec3 x, float a, float b, float c, float d, float e, float f, float cut){
+  vec3 lg = c * log(max(a * x + b, vec3(1e-6))) / log(10.0) + d;
+  return mix(e * x + f, lg, step(vec3(cut), x));
+}
+const mat3 M709_2020 = mat3(0.6274, 0.0691, 0.0164, 0.3293, 0.9195, 0.0880, 0.0433, 0.0114, 0.8956);
+vec3 lut3(vec3 lin, vec3 srgb){
+  vec3 x = uLutIn == 0 ? srgb
+         : uLutIn == 2 ? flogEnc(M709_2020 * lin, 5.555556, 0.064829, 0.245281, 0.384316, 8.799461, 0.092864, 0.000889)
+                       : flogEnc(M709_2020 * lin, 0.555556, 0.009468, 0.344676, 0.790453, 8.735631, 0.092864, 0.00089);
+  x = clamp(x, 0.0, 1.0) * (63.0 / 64.0) + 0.5 / 64.0;
+  return texture(uLut3, x).rgb;
+}
 vec3 gradeTint(vec3 g){ vec3 c = hsv2rgb(vec3(g.x, 1.0, 1.0)); return (c - luma(c)) * g.y * 0.3; }
 
 const float CEN[8] = float[8](0.0, 0.0833, 0.1667, 0.3333, 0.5, 0.6667, 0.75, 0.8333);
@@ -107,6 +124,11 @@ void main(){
   float gain = exp2(uExposure);
   vec3 p = toSrgb(toLin(clamp(c, 0.0, 1.0)) * gain * wb);
   vec3 pl = toSrgb(toLin(l) * gain * wb);   // 주변 밝기 (하이라이트·섀도·Clarity 기준)
+  // 가져온 LUT: 노출·화이트밸런스 바로 뒤, 다른 톤 보정 앞 (LUT 제작자 권장 순서)
+  if (uLutAmt > 0.0) {
+    p = mix(p, lut3(toLin(clamp(c, 0.0, 1.0)) * gain * wb, clamp(p, 0.0, 1.0)), uLutAmt);
+    pl = mix(pl, lut3(toLin(l) * gain * wb, clamp(pl, 0.0, 1.0)), uLutAmt);
+  }
 
   // Dehaze: 안개 모델 I = J·t + A·(1 − t), 주변의 가장 어두운 채널로 t를 어림 (dark channel prior)
   if (uDehaze > 0.0) {
@@ -277,6 +299,8 @@ export class Pipeline {
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     this.lut = this.tex(256, 1);
+    this.luts = new Map();   // 가져온 3D LUT: id → { tex, input }
+    this.dummy3 = this.tex3(1, new Uint8Array([0, 0, 0]));
     this.seed = Math.random() * 100;
     this.set = null;
   }
@@ -298,6 +322,30 @@ export class Pipeline {
     return t;
   }
 
+  tex3(n, rgb) {
+    const gl = this.gl, t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_3D, t);
+    for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, p, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGB8, n, n, n, 0, gl.RGB, gl.UNSIGNED_BYTE, rgb);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    return t;
+  }
+
+  /** 가져온 LUT 등록 (rgb: 64³×3 Uint8, input: srgb·flog·flog2) */
+  setLUT(id, rgb, input) {
+    const old = this.luts.get(id);
+    if (old) this.gl.deleteTexture(old.tex);
+    this.luts.set(id, { tex: this.tex3(Math.round(Math.cbrt(rgb.length / 3)), rgb), input });
+  }
+
+  dropLUT(id) {
+    const old = this.luts.get(id);
+    if (old) { this.gl.deleteTexture(old.tex); this.luts.delete(id); }
+  }
+
   target(w, h) {
     const gl = this.gl, t = this.tex(w, h), fb = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
@@ -310,9 +358,9 @@ export class Pipeline {
     gl.bindFramebuffer(gl.FRAMEBUFFER, out ? out.fb : null);
     gl.viewport(0, 0, out ? out.w : this.canvas.width, out ? out.h : this.canvas.height);
     gl.useProgram(prog.p);
-    inputs.forEach(([name, t], i) => {
+    inputs.forEach(([name, t, target], i) => {
       gl.activeTexture(gl.TEXTURE0 + i);
-      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.bindTexture(target || gl.TEXTURE_2D, t);
       gl.uniform1i(prog.u[name], i);
     });
     if (setU) setU(prog.u);
@@ -386,7 +434,11 @@ export class Pipeline {
     this.uploadLUT(st.curve, st._fade);
     const L = st.light, C = st.color, E = st.effects, D = st.detail, G = st.grading, P = st.point;
     const g3 = (z) => [z.h / 360, z.s / 100, z.l / 100];
-    this.pass(this.main, out, [['uSrc', set.src], ['uS', set.S.t], ['uM', set.M.t], ['uL', set.L.t], ['uLut', this.lut]], (u) => {
+    const L3 = st._lut ? this.luts.get(st._lut.id) : null;
+    this.pass(this.main, out, [['uSrc', set.src], ['uS', set.S.t], ['uM', set.M.t], ['uL', set.L.t], ['uLut', this.lut],
+      ['uLut3', L3 ? L3.tex : this.dummy3, gl.TEXTURE_3D]], (u) => {
+      gl.uniform1f(u.uLutAmt, L3 ? st._lut.amount : 0);
+      gl.uniform1i(u.uLutIn, L3 ? ({ srgb: 0, flog: 1, flog2: 2 })[L3.input] ?? 0 : 0);
       const f = (n, v) => u[n] && gl.uniform1f(u[n], v);
       const v3 = (n, a) => u[n] && gl.uniform3fv(u[n], a);
       gl.uniform2f(u.uRes, out ? out.w : this.canvas.width, out ? out.h : this.canvas.height);

@@ -30,6 +30,7 @@ export const store = {
   putMeta: (m) => tx('meta', 'readwrite', (s) => s.put(m)),
   putBlob: (id, b) => tx('blob', 'readwrite', (s) => s.put(b, id)),
   getBlob: (id) => tx('blob', 'readonly', (s) => s.get(id)),
+  delBlob: (id) => tx('blob', 'readwrite', (s) => s.delete(id)),
   list: async () => ((await tx('meta', 'readonly', (s) => s.getAll())) || []).sort((a, b) => b.added - a.added),
   async del(id) {
     await tx('meta', 'readwrite', (s) => s.delete(id));
