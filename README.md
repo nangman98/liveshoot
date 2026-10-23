@@ -128,6 +128,7 @@
 - **iPad Safari 실기기**: WebGL2, HEIC 읽기, 공유 시트, 홈 화면 앱 동작 확인 전
 - **Google Drive 직접 올리기**: OAuth 설정 뒤 실제 올리기 확인 전
 - **받기 앱 → 웹 편집기 연결**: 다음 판
+- **HDR**: iPad Safari에서 [HDR 시험 페이지](https://nangman98.github.io/liveshoot/hdr-test.html) 결과를 받은 뒤 방식을 정함(PLAN.md)
 - **스크린샷**: 완성된 뒤 실제 iPad 화면으로 넣음
 - **사진 보관함에서 고른 사진의 위치**: iPad Safari가 사진 보관함에서 올릴 때 위치를 빼는지 확인 전. 빼면 파일 앱에서 고른 원본은 위치가 남음 [잠정]
 - **RAW 속도와 메모리**: iPad에서 원본 크기(전체 해독) 내보내기가 메모리 한도 안에서 되는지 확인 전

@@ -30,7 +30,14 @@
 | 단계 | 상태 (2026-10-23) |
 |---|---|
 | 1 색감 | 프로필 22개·강도·썸네일, Auto, 흑백·B&W Mix, 구간 커브 완료. 시험 11/11. HDR은 2단계로 |
-| 2 기반·HDR | 시작 전 |
+| 2 기반·HDR | 조사 끝, 시작 전. iPad에서 `hdr-test.html` 결과를 받은 뒤 HDR 방식을 정함. RAW Camera Match는 사용자 승인(2026-10-23) |
+
+## 2단계 HDR 방식 (조사 뒤)
+
+- **캔버스가 HDR을 그리면**: Lightroom처럼 HDR 화면에서 바로 편집함(WebGPU `rgba16float` + `toneMapping: extended`)
+- **캔버스가 못 그리면**: 편집은 SDR 화면에서 하고, "HDR 보기"는 보정 결과로 만든 gain map JPEG을 `<img>`로 띄움(Safari 26이 HDR 사진을 HDR로 보여 줌)
+- **내보내기는 어느 쪽이든**: SDR 기본 그림 + gain map을 ISO 21496-1과 Ultra HDR(XMP hdrgm) 메타데이터로 함께 씀
+- **RAW**: 16비트 선형으로 해독해 1.0을 넘는 하이라이트를 HDR 쪽에 남김
 
 ## 판정 기록
 
@@ -48,4 +55,6 @@
 | Lightroom Auto | 학습 모델이 Exposure·Contrast·Highlights·Shadows·Whites·Blacks·Vibrance·Saturation을 정함 | [Adobe](https://developer.adobe.com/firefly-services/docs/lightroom/guides/auto-tone) |
 | Capture One 강점 | 연결 촬영 안정성, Color Editor, Skin Tone 균일도, 레이어 | [DIYPhotography](https://www.diyphotography.net/lightroom-vs-capture-one/), [Format](https://www.format.com/magazine/resources/photography/capture-one-vs-lightroom/) |
 | LightCraft 프로필 | 슬라이더 아래 깔리는 값 묶음 × 강도(0–200 %), 22개 | [profiles.rs](https://github.com/storytold/lightcraft/blob/main/crates/pipeline/src/profiles.rs) |
+| HDR 캔버스 (추가 조사) | WebGL HDR은 표준 전(Khronos 제안). WebGPU `toneMapping: extended`는 Chrome에서 됨, Safari 동작은 미확인 | [Khronos PR 3668](https://github.com/KhronosGroup/WebGL/pull/3668), [WebGPU HDR](https://github.com/ccameron-chromium/webgpu-hdr/blob/main/EXPLAINER.md) |
+| HDR 사진 표시 | Safari 26은 gain map JPEG·AVIF·HEIF HDR 사진을 HDR로 보여 줌. iPadOS 18부터 ISO 21496-1 | [Greg Benz](https://gregbenzphotography.com/photography-reviews/apple-safari-now-supports-hdr-photography/), [Greg Benz](https://gregbenzphotography.com/hdr-photos/apple-macos-ios-hdr-iso-gain-map-21496-1/) |
 | LightCraft RAW 색감 | 카메라 JPEG 색감에 맞춰 시작 | [raw-photos-look-dull.md](https://github.com/storytold/lightcraft/blob/main/docs/user/troubleshooting/raw-photos-look-dull.md) |

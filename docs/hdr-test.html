@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LiveShoot HDR 시험</title>
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <style>
+    body { margin: 0; padding: 20px; background: #111; color: #eee; font: 15px/1.5 -apple-system, "Apple SD Gothic Neo", sans-serif; }
+    h1 { font-size: 20px; }
+    table { border-collapse: collapse; margin: 12px 0; }
+    td { border: 1px solid #333; padding: 6px 10px; }
+    .ok { color: #4cd964; } .no { color: #ff6b6b; }
+    canvas { width: 100%; max-width: 640px; height: 220px; display: block; border: 1px solid #333; }
+    .labels { display: flex; max-width: 640px; } .labels span { flex: 1; text-align: center; color: #aaa; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>LiveShoot HDR 시험</h1>
+  <p>iPad에서 HDR 화면 편집을 쓸 수 있는지 확인하는 페이지. 이 화면을 캡처해서 보내 주세요.</p>
+  <table id="t"></table>
+  <h2 style="font-size:16px">WebGPU HDR 캔버스</h2>
+  <canvas id="c" width="1280" height="440"></canvas>
+  <div class="labels"><span>왼쪽: 흰색 1.0 (보통 흰색)</span><span>오른쪽: 4.0 (HDR이면 더 밝게 빛남)</span></div>
+  <p id="v" style="color:#aaa"></p>
+  <script type="module">
+    const rows = [];
+    const add = (k, v, ok) => rows.push(`<tr><td>${k}</td><td class="${ok === undefined ? '' : ok ? 'ok' : 'no'}">${v}</td></tr>`);
+    const show = () => { document.querySelector('#t').innerHTML = rows.join(''); };
+    add('브라우저', navigator.userAgent);
+    add('화면이 HDR을 낼 수 있음 (dynamic-range: high)', matchMedia('(dynamic-range: high)').matches ? '예' : '아니오', matchMedia('(dynamic-range: high)').matches);
+    add('넓은 색역 (color-gamut: p3)', matchMedia('(color-gamut: p3)').matches ? '예' : '아니오', matchMedia('(color-gamut: p3)').matches);
+    const gl = document.createElement('canvas').getContext('webgl2');
+    add('WebGL2', gl ? '있음' : '없음', !!gl);
+    if (gl) {
+      const half = !!gl.getExtension('EXT_color_buffer_half_float') || !!gl.getExtension('EXT_color_buffer_float');
+      add('16비트 부동소수점 렌더 (WebGL2)', half ? '됨' : '안 됨', half);
+      add('최대 텍스처 크기', gl.getParameter(gl.MAX_TEXTURE_SIZE));
+    }
+    show();
+    try {
+      if (!navigator.gpu) throw new Error('WebGPU 없음');
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) throw new Error('GPU 어댑터 없음');
+      const device = await adapter.requestDevice();
+      const ctx = document.querySelector('#c').getContext('webgpu');
+      ctx.configure({ device, format: 'rgba16float', colorSpace: 'display-p3', toneMapping: { mode: 'extended' }, alphaMode: 'opaque' });
+      const cfg = ctx.getConfiguration ? ctx.getConfiguration() : null;
+      add('WebGPU', '있음', true);
+      add('캔버스 toneMapping 설정 결과', cfg ? (cfg.toneMapping ? cfg.toneMapping.mode : '항목 없음') : 'getConfiguration 없음', cfg && cfg.toneMapping && cfg.toneMapping.mode === 'extended');
+      const mod = device.createShaderModule({ code: `
+        @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+          var p = array<vec2f, 3>(vec2f(-1, -1), vec2f(3, -1), vec2f(-1, 3));
+          return vec4f(p[i], 0, 1);
+        }
+        @fragment fn fs(@builtin(position) q: vec4f) -> @location(0) vec4f {
+          let v = select(1.0, 4.0, q.x > 640.0);
+          return vec4f(v, v, v, 1);
+        }` });
+      const pipe = device.createRenderPipeline({ layout: 'auto', vertex: { module: mod, entryPoint: 'vs' },
+        fragment: { module: mod, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] }, primitive: { topology: 'triangle-list' } });
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+      pass.setPipeline(pipe); pass.draw(3); pass.end();
+      device.queue.submit([enc.finish()]);
+      document.querySelector('#v').textContent = '오른쪽 칸이 왼쪽보다 눈에 띄게 밝으면 HDR 캔버스가 되는 것. 둘이 똑같이 하얗면 안 되는 것.';
+    } catch (e) {
+      add('WebGPU HDR 캔버스', '시험 못 함: ' + e.message, false);
+    }
+    show();
+  </script>
+</body>
+</html>
