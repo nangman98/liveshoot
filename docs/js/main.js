@@ -3,7 +3,7 @@ import { store, defaults, withDefaults, clone } from './store.js';
 import { CurveEditor } from './curve.js';
 import { loadImage, toCanvas, renderJPEG, download, canShareFiles, driveConfig, saveDriveConfig, driveToken, pickDriveFolder, uploadToDrive } from './export.js';
 
-export const VERSION = 'v1';
+export const VERSION = 'v2';
 const PREVIEW = 2048;   // 화면용 긴 변 (px)
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -629,9 +629,8 @@ async function main() {
   window.__ls = Object.assign(app, { rerender: () => { syncAll(); changed(); }, select, store });   // 시험용
 
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    // 새로고침을 강제하지 않는다 (사진을 고르는 중일 수 있음). sw.js가 네트워크 먼저라 열 때마다 최신판을 받는다.
     navigator.serviceWorker.register('sw.js');
-    let reloaded = false;
-    navigator.serviceWorker.addEventListener('controllerchange', () => { if (!reloaded && navigator.serviceWorker.controller) { reloaded = true; location.reload(); } });
   }
 }
 
