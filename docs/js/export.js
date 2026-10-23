@@ -1,6 +1,7 @@
 // 내보내기: 원본에서 다시 그려 JPEG로 만들고, 공유 시트·다운로드·Google Drive 폴더로 보낸다.
 import { renderGeometry } from './geometry.js';
-import { readExif, prepare, insertExif } from './exif.js';
+import { readExif, prepare, insertExif, buildExif } from './exif.js';
+import { decodeRaw } from './raw.js';
 
 export const MAX_AREA = 16_000_000;   // iPad Safari 캔버스 면적 한도(약 16.7 MP) 안쪽
 
@@ -31,14 +32,24 @@ export function toCanvas(src, maxEdge) {
  * 원본 JPEG의 EXIF(날짜·카메라, keepGPS면 위치까지)를 다시 넣는다.
  */
 export async function renderJPEG(pipe, meta, blob, edge, quality, keepGPS = true) {
-  const img = await loadImage(blob);
-  const c = renderGeometry(img, meta.settings.geometry, Math.min(edge || Infinity, pipe.maxTex), { maxArea: MAX_AREA });
+  let src, seg = null;
+  if (meta.raw) {
+    // 1/2 해독으로 원하는 크기가 나오면 빠른 쪽, 아니면(원본 크기·많이 자름) 전체 해독
+    const cr = meta.settings.geometry.crop || { w: 1, h: 1 };
+    const halfLong = Math.max(meta.w * cr.w, meta.h * cr.h) / 2;
+    src = (await decodeRaw(blob, { half: !!edge && edge <= halfLong })).canvas;
+    seg = buildExif(meta.exif || {}, keepGPS);
+  } else {
+    src = await loadImage(blob);
+    const ex = await readExif(blob);
+    if (ex) seg = prepare(ex.seg, keepGPS);
+  }
+  const c = renderGeometry(src, meta.settings.geometry, Math.min(edge || Infinity, pipe.maxTex), { maxArea: MAX_AREA });
   const out = pipe.renderFull(c, c.width, c.height, meta.settings, meta.autoEV);
   let jpg = await new Promise((r) => out.toBlob(r, 'image/jpeg', quality / 100));
-  const ex = await readExif(blob);
-  if (ex) jpg = await insertExif(jpg, prepare(ex.seg, keepGPS));
+  if (seg) jpg = await insertExif(jpg, seg);
   const stem = meta.name.replace(/\.[^.]+$/, '');
-  return { file: new File([jpg], `${stem}_edit.jpg`, { type: 'image/jpeg' }), w: c.width, h: c.height, exif: !!ex };
+  return { file: new File([jpg], `${stem}_edit.jpg`, { type: 'image/jpeg' }), w: c.width, h: c.height, exif: !!seg };
 }
 
 export function download(files) {

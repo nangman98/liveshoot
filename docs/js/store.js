@@ -34,6 +34,7 @@ export const store = {
   async del(id) {
     await tx('meta', 'readwrite', (s) => s.delete(id));
     await tx('blob', 'readwrite', (s) => s.delete(id));
+    await tx('blob', 'readwrite', (s) => s.delete(id + ':base'));
   },
   async clear() {
     await tx('meta', 'readwrite', (s) => s.clear());

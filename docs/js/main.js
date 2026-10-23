@@ -3,9 +3,10 @@ import { store, defaults, withDefaults, clone } from './store.js';
 import { CurveEditor } from './curve.js';
 import { renderGeometry, frameSize, aspectRatio, maxCrop, CropBox, ASPECTS } from './geometry.js';
 import { readExif } from './exif.js';
+import { isRaw, decodeRaw, rawInfo } from './raw.js';
 import { loadImage, toCanvas, renderJPEG, download, canShareFiles, driveConfig, saveDriveConfig, driveToken, pickDriveFolder, uploadToDrive } from './export.js';
 
-export const VERSION = 'v4';
+export const VERSION = 'v5';
 const PREVIEW = 2048;   // 화면용 긴 변 (px)
 const BASE = 3072;      // 자르기·회전 전에 읽어 두는 원본 (긴 변 px)
 
@@ -46,16 +47,25 @@ function startSettings() {
   return st;
 }
 
-/** 64 px로 줄인 그림의 log 평균 휘도를 중간 회색(선형 0.18)에 맞추는 EV, ±2.5 */
+/**
+ * 자동 노출: 128 px로 줄인 그림의 log 평균 휘도를 중간 회색(선형 0.18)에 맞추는 EV(±2.5).
+ * 올릴 때는 밝은 쪽 1 % 화소(99번째 백분위 채널 최댓값)가 1을 넘지 않는 만큼까지만 올린다.
+ */
 function autoEV(canvas) {
-  const c = toCanvas(canvas, 64), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  const c = toCanvas(canvas, 128), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
   const lin = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
-  let s = 0, n = 0;
+  let s = 0;
+  const mx = [];
   for (let i = 0; i < d.length; i += 4) {
-    s += Math.log(Math.max(1e-4, 0.2126 * lin(d[i]) + 0.7152 * lin(d[i + 1]) + 0.0722 * lin(d[i + 2])));
-    n++;
+    const r = lin(d[i]), g = lin(d[i + 1]), b = lin(d[i + 2]);
+    s += Math.log(Math.max(1e-4, 0.2126 * r + 0.7152 * g + 0.0722 * b));
+    mx.push(Math.max(r, g, b));
   }
-  return Math.max(-2.5, Math.min(2.5, Math.log2(0.18 / Math.exp(s / n))));
+  mx.sort((a, b) => a - b);
+  const p99 = Math.max(1e-4, mx[Math.floor(mx.length * 0.99)]);
+  const evMean = Math.log2(0.18 / Math.exp(s / mx.length));
+  const ev = evMean > 0 ? Math.min(evMean, Math.max(0, Math.log2(0.98 / p99))) : evMean;
+  return Math.max(-2.5, Math.min(2.5, ev));
 }
 
 let saveTimer;
@@ -143,25 +153,36 @@ async function importFiles(files) {
   let n = 0;
   for (const f of files) {
     try {
-      const img = await loadImage(f);
+      let img, rawMeta = null;
+      if (isRaw(f)) {
+        toast(`RAW 해독 중: ${f.name}`);
+        const r = await decodeRaw(f, { half: true });
+        img = r.canvas;
+        rawMeta = r.meta;
+      } else {
+        img = await loadImage(f);
+      }
       const c = toCanvas(img, BASE);
       const thumb = await new Promise((r) => toCanvas(c, 240).toBlob(r, 'image/jpeg', 0.8));
       const settings = app.carry && app.cur ? clone(app.cur.settings) : startSettings();
       settings.geometry = defaults().geometry;
-      const ex = await readExif(f);
+      const ex = rawMeta ? null : await readExif(f);
       const meta = {
         id: crypto.randomUUID(), name: f.name || `photo_${Date.now()}.jpg`, added: Date.now(),
-        w: img.naturalWidth, h: img.naturalHeight, autoEV: autoEV(c), settings, liked: false, exported: false, thumb,
-        exif: ex ? ex.info : null,
+        w: rawMeta ? img.width * 2 : img.naturalWidth, h: rawMeta ? img.height * 2 : img.naturalHeight,
+        autoEV: autoEV(c), settings, liked: false, exported: false, thumb,
+        exif: rawMeta ? rawInfo(rawMeta) : ex ? ex.info : null, raw: !!rawMeta,
       };
       await store.putBlob(meta.id, f);
+      // RAW는 해독이 느리니 화면용 원본을 따로 둔다
+      if (rawMeta) await store.putBlob(meta.id + ':base', await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.95)));
       await store.putMeta(meta);
       app.photos.unshift(meta);
       n++;
       if (app.follow || !app.cur) await select(meta.id, c);
       else renderStrip();
     } catch (e) {
-      toast(`열 수 없는 사진: ${f.name} (RAW는 Mac mini에서 보정)`);
+      toast(isRaw(f) ? `RAW를 열 수 없음: ${f.name} (${e.message})` : `열 수 없는 사진: ${f.name}`);
     }
   }
   renderStrip();
@@ -174,7 +195,7 @@ async function select(id, ready) {
   app.cur = m;
   let c = ready;
   if (!c) {
-    const blob = await store.getBlob(id);
+    const blob = await store.getBlob(m.raw ? id + ':base' : id);
     c = toCanvas(await loadImage(blob), BASE);
   }
   app.base = c;
