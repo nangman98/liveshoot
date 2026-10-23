@@ -35,10 +35,12 @@
 
 | 패널 | 들어 있는 것 |
 |---|---|
+| 프로필 | Basic(Color·Neutral·Vivid·Landscape·Portrait·Monochrome), Film 4, Cinematic 4, Snap 4(밝은 웨딩·벚꽃·깨끗한 피부·무디), B&W 4. 강도 0–200 %, 지금 사진으로 그린 썸네일. 슬라이더는 그대로 두고 그 아래에 깔림 |
+| Auto·흑백 | Auto는 히스토그램 통계로 노출·대비·하이라이트·섀도·Whites·Blacks·Vibrance·채도를 정함(학습 모델 아님). B&W 버튼과 B&W Mix 8색 |
 | RAW | ARW·CR3·RAF·DNG·NEF 등을 LibRaw(WebAssembly)로 해독. 화면은 1/2 크기로 빠르게, 원본 크기 내보내기는 전체 해독. 날짜·카메라·렌즈·ISO·셔터·조리개·초점거리·GPS를 읽어 내보낸 JPEG에 EXIF로 씀 |
 | 자르기·회전 | 90° 회전, 좌우 뒤집기, 수평 맞추기 ±45°(빈 모서리 없이 자동 확대), 비율(원본·자유·1:1·4:5·3:2·16:9 등)과 끌어서 자르기 |
 | Light | 노출 ±5 EV, 대비, 하이라이트, 섀도, Whites, Blacks, 자동 노출 |
-| Curve | 점 커브 RGB·R·G·B, Refine Saturation |
+| Curve | 점 커브 RGB·R·G·B, 구간 커브(Highlights·Lights·Darks·Shadows), Refine Saturation |
 | Color | 화이트밸런스 스포이트, 색온도, 색조, Vibrance(피부색 보호), 채도 |
 | Color Mixer | 8색(빨강·주황·노랑·초록·아쿠아·파랑·보라·마젠타) Hue·Saturation·Luminance |
 | Point Color | 스포이트로 고른 색만 Hue·Saturation·Luminance, 범위 |
@@ -109,6 +111,7 @@
 
 | 시험 | 결과 |
 |---|---|
+| 프로필·Auto·흑백·구간 커브 11가지 | 11/11 통과. 썸네일 22개, 컬러 Basic 프로필에서 회색 패치 채도차 0.0, 인물 계열 피부 색상각 변화 최대 1.6°, 흑백 프로필 채도 0, Auto로 어두운 사진 평균 80 → 124, B&W Mix 파랑 −80이 파랑 패치만 71 → 37 |
 | RAW (Sony FX30 ARW, 6240 × 4168) | 가져오기 0.5 s, 2400 px 내보내기 0.5 s(Mac Chrome). 날아간 화소 0.67 %. 내보낸 JPEG를 Pillow로 읽으니 Sony·ILME-FX30·2023:04:28 15:01:20·ISO 800·1/125 s·F5·29 mm·E 18-135mm F3.5-5.6 OSS가 맞음 |
 | 자르기·회전·EXIF·되돌리기 16가지 | 16/16 통과. 90° 회전 2048×1365 → 1365×2048, 수평 7° 네 모서리 빈칸 없음, 1:1 자르기 내보내기 1249×1249, 날짜 2025:04:08 19:32:10·GPS 37.5665, 126.9780·ILCE-7M4 유지, 세로 촬영(Orientation 6) 방향 일치 |
 | 보정 방향 30가지 | 30/30 통과. 예: 노출 +1 EV 밝기 146 → 193, 색온도 +50 R−B 16.1 → 36.0, 채도 −100 채도 0.18 → 0.00, Vignette −80 모서리 151 → 30 (가운데 142 그대로), Color NR 80 색 노이즈 244 → 24.7 |

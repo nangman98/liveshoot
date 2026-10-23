@@ -1,3 +1,5 @@
+import { effective } from './profiles.js';
+
 // WebGL2 보정 엔진. 늘 원본(미리보기 크기)에서 처음부터 다시 그린다.
 // 패스: 원본 → 흐림 3단(작게 S, 중간 M, 크게 L) → 메인 셰이더 1번.
 
@@ -32,6 +34,9 @@ uniform float uOriginal, uSeed;
 uniform float uExposure, uContrast, uHighlights, uShadows, uWhites, uBlacks;
 uniform float uTemp, uTint, uVibrance, uSaturation, uRefineSat;
 uniform vec3 uMix[8];
+uniform float uBWMix[8];
+uniform float uBW;
+uniform vec4 uRegion;     // highlights, lights, darks, shadows
 uniform vec4 uPoint;      // hue, range, -, active
 uniform vec3 uPointAdj;   // hue, sat, lum
 uniform vec3 uGradeS, uGradeM, uGradeH, uGradeG;  // hue, sat, lum
@@ -59,6 +64,7 @@ vec3 hsv2rgb(vec3 c){
   return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
 }
 float hueDist(float a, float b){ float d = abs(a - b); return min(d, 1.0 - d); }
+float bump(float x, float c){ float t = (x - c) / 0.16; return exp(-t * t); }
 float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float vnoise(vec2 p){
   vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
@@ -123,6 +129,8 @@ void main(){
   L += uBlacks * 0.2 * (1.0 - smoothstep(0.0, 0.4, L));
   if (uContrast > 0.0) L = mix(L, smoothstep(0.0, 1.0, L), uContrast);
   else if (uContrast < 0.0) L = mix(L, 0.5 + (L - 0.5) * 0.5, -uContrast);
+  // 구간 커브 (Lightroom의 parametric curve: 하이라이트·밝은 톤·어두운 톤·섀도)
+  L += 0.25 * (uRegion.x * bump(L, 0.875) + uRegion.y * bump(L, 0.625) + uRegion.z * bump(L, 0.375) + uRegion.w * bump(L, 0.125));
   L = clamp(L, 0.0, 1.2);
   p *= L / L0;
   float mx = max(max(p.r, p.g), p.b);
@@ -137,13 +145,13 @@ void main(){
   h.y = mix(hb.y, h.y, uRefineSat);
 
   // Color Mixer 8색
-  float hs = 0.0, ss = 0.0, ls = 0.0, wsum = 0.0;
-  float satGate = smoothstep(0.0, 0.15, h.y);
+  float hs = 0.0, ss = 0.0, ls = 0.0, bws = 0.0, wsum = 0.0;
+  float satGate = smoothstep(0.0, 0.15, h.y), bwGate = smoothstep(0.0, 0.25, h.y);
   for (int i = 0; i < 8; i++) {
     float w = 1.0 - smoothstep(0.0, SPAN[i], hueDist(h.x, CEN[i]));
-    hs += w * uMix[i].x; ss += w * uMix[i].y; ls += w * uMix[i].z; wsum += w;
+    hs += w * uMix[i].x; ss += w * uMix[i].y; ls += w * uMix[i].z; bws += w * uBWMix[i]; wsum += w;
   }
-  if (wsum > 1.0) { hs /= wsum; ss /= wsum; ls /= wsum; }
+  if (wsum > 1.0) { hs /= wsum; ss /= wsum; ls /= wsum; bws /= wsum; }
   h.x = fract(h.x + hs * satGate * 30.0 / 360.0);
   h.y = clamp(h.y * (1.0 + ss * satGate), 0.0, 1.0);
   float lumAdj = ls * satGate;
@@ -161,6 +169,9 @@ void main(){
   h.y = clamp(h.y * (1.0 + uVibrance * (1.0 - h.y) * (1.0 - 0.5 * skin)), 0.0, 1.0);
   h.y = clamp(h.y * (1.0 + uSaturation), 0.0, 1.0);
   p = hsv2rgb(h) * (1.0 + lumAdj * 0.5);
+
+  // 흑백: 색마다 밝기를 B&W Mix만큼 바꿔 회색으로 (색이 진할수록 많이)
+  if (uBW > 0.5) p = vec3(clamp(luma(p) * (1.0 + bws * 0.6 * bwGate), 0.0, 1.0));
 
   // Color Grading
   float Lg = luma(p);
@@ -348,14 +359,17 @@ export class Pipeline {
     }
   }
 
-  uploadLUT(c) {
+  uploadLUT(c, fade) {
     const R = curveLUT(c.r), G = curveLUT(c.g), B = curveLUT(c.b), A = curveLUT(c.rgb);
     const data = new Uint8Array(256 * 4);
     const at = (lut, v) => lut[Math.round(Math.min(1, Math.max(0, v)) * 255)];
+    const F = fade || { master: [0, 1], r: [0, 1], g: [0, 1], b: [0, 1] };
+    const fd = (v, [lo, hi]) => lo + v * (hi - lo);   // 프로필 페이드: 커브 끝점 이동
     for (let i = 0; i < 256; i++) {
-      data[i * 4] = at(R, A[i]) * 255;
-      data[i * 4 + 1] = at(G, A[i]) * 255;
-      data[i * 4 + 2] = at(B, A[i]) * 255;
+      const m = fd(A[i], F.master);
+      data[i * 4] = fd(at(R, m), F.r) * 255;
+      data[i * 4 + 1] = fd(at(G, m), F.g) * 255;
+      data[i * 4 + 2] = fd(at(B, m), F.b) * 255;
       data[i * 4 + 3] = 255;
     }
     const gl = this.gl;
@@ -364,11 +378,12 @@ export class Pipeline {
   }
 
   /** 설정을 셰이더에 넣고 out(없으면 화면 캔버스)에 그린다 */
-  draw(st, autoEV, original, out) {
+  draw(user, autoEV, original, out) {
     const set = this.set, gl = this.gl;
     if (!set) return;
+    const st = effective(user);   // 프로필을 사용자 슬라이더 아래에 깔기
     if (st.detail.sharpen.radius !== set.sharpRadius && set.source) this.build(set.source, set.w, set.h, st.detail.sharpen.radius);
-    this.uploadLUT(st.curve);
+    this.uploadLUT(st.curve, st._fade);
     const L = st.light, C = st.color, E = st.effects, D = st.detail, G = st.grading, P = st.point;
     const g3 = (z) => [z.h / 360, z.s / 100, z.l / 100];
     this.pass(this.main, out, [['uSrc', set.src], ['uS', set.S.t], ['uM', set.M.t], ['uL', set.L.t], ['uLut', this.lut]], (u) => {
@@ -382,6 +397,10 @@ export class Pipeline {
       f('uTemp', C.temp / 100); f('uTint', C.tint / 100); f('uVibrance', C.vibrance / 100); f('uSaturation', C.saturation / 100);
       f('uRefineSat', st.curve.refineSat / 100);
       v3('uMix', st.mixer.flatMap((b) => [b.h / 100, b.s / 100, b.l / 100]));
+      if (u.uBWMix) gl.uniform1fv(u.uBWMix, st.bw.map((v) => v / 100));
+      f('uBW', st.treatment === 'bw' ? 1 : 0);
+      const R = st.curve.region;
+      gl.uniform4f(u.uRegion, R.highlights / 100, R.lights / 100, R.darks / 100, R.shadows / 100);
       gl.uniform4f(u.uPoint, P.hue / 360, P.range / 360, 0, P.active ? 1 : 0);
       v3('uPointAdj', [P.hueShift / 100, P.satShift / 100, P.lumShift / 100]);
       v3('uGradeS', g3(G.shadows)); v3('uGradeM', g3(G.midtones)); v3('uGradeH', g3(G.highlights)); v3('uGradeG', g3(G.global));
@@ -426,6 +445,29 @@ export class Pipeline {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, this.canvas);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     return this._ct;
+  }
+
+  /** 작은 원본 하나에 설정 여러 개를 그려 캔버스 목록으로 (프로필 썸네일). 미리보기 상태는 되살린다. */
+  renderMany(source, w, h, list, autoEV) {
+    const keep = this.set, gl = this.gl;
+    this.set = null;
+    this.build(source, w, h, 1);
+    const out = this.target(w, h), px = new Uint8Array(w * h * 4), row = w * 4, res = [];
+    for (const st of list) {
+      this.draw(st, autoEV, false, out);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, out.fb);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const x = c.getContext('2d'), img = x.createImageData(w, h);
+      for (let y = 0; y < h; y++) img.data.set(px.subarray((h - 1 - y) * row, (h - y) * row), y * row);
+      x.putImageData(img, 0, 0);
+      res.push(c);
+    }
+    gl.deleteTexture(out.t); gl.deleteFramebuffer(out.fb);
+    this.free(this.set);
+    this.set = keep;
+    return res;
   }
 
   /** 내보내기: source(w×h 캔버스)를 같은 설정으로 그려 2D 캔버스로 돌려준다. 미리보기 상태는 되살린다. */

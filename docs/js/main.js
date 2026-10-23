@@ -4,9 +4,10 @@ import { CurveEditor } from './curve.js';
 import { renderGeometry, frameSize, aspectRatio, maxCrop, CropBox, ASPECTS } from './geometry.js';
 import { readExif } from './exif.js';
 import { isRaw, decodeRaw, rawInfo } from './raw.js';
+import { PROFILES, PROFILE_GROUPS, profileById } from './profiles.js';
 import { loadImage, toCanvas, renderJPEG, download, canShareFiles, driveConfig, saveDriveConfig, driveToken, pickDriveFolder, uploadToDrive } from './export.js';
 
-export const VERSION = 'v5';
+export const VERSION = 'v6';
 const PREVIEW = 2048;   // 화면용 긴 변 (px)
 const BASE = 3072;      // 자르기·회전 전에 읽어 두는 원본 (긴 변 px)
 
@@ -77,6 +78,59 @@ function changed(record = true) {
   const m = app.cur;
   saveTimer = setTimeout(() => store.putMeta(m), 400);
   if (record) scheduleRecord(m);
+  scheduleThumbs();
+}
+
+// ---------- 프로필 썸네일 (지금 사진 + 지금 보정 위에 각 프로필) ----------
+
+let thumbTimer;
+function scheduleThumbs() { clearTimeout(thumbTimer); thumbTimer = setTimeout(updateProfileThumbs, 600); }
+function updateProfileThumbs() {
+  if (!app.cur || !app.preview || !app.profileCells) return;
+  const src = toCanvas(app.preview, 180);
+  const list = PROFILES.map((p) => ({ ...clone(app.cur.settings), profile: { id: p.id, amount: 100 } }));
+  const cs = app.pipe.renderMany(src, src.width, src.height, list, app.cur.autoEV);
+  PROFILES.forEach((p, i) => { const cell = app.profileCells[p.id]; cell.querySelector('canvas')?.remove(); cell.prepend(cs[i]); });
+}
+
+/**
+ * Auto: 히스토그램 통계로 톤 8개를 정한다 (Lightroom처럼 학습 모델이 아님).
+ * 노출은 자동 노출과 같은 규칙, Whites·Blacks는 0.5·99.5 백분위를 0.02·0.97로, 하이라이트·섀도는 날아가거나 묻힌 만큼.
+ */
+function autoTone() {
+  if (!app.cur) return;
+  const st = app.cur.settings, ev = autoEV(app.preview);
+  const c = toCanvas(app.preview, 160), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  const lin = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  const enc = (v) => (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
+  const g = Math.pow(2, ev), Ls = [];
+  let sat = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const r = lin(d[i]) * g, gg = lin(d[i + 1]) * g, b = lin(d[i + 2]) * g;
+    Ls.push(enc(Math.min(1, 0.2126 * r + 0.7152 * gg + 0.0722 * b)));
+    const mx = Math.max(d[i], d[i + 1], d[i + 2]), mn = Math.min(d[i], d[i + 1], d[i + 2]);
+    sat += mx ? (mx - mn) / mx : 0;
+  }
+  Ls.sort((a, b) => a - b);
+  const q = (p) => Ls[Math.min(Ls.length - 1, Math.floor(Ls.length * p))];
+  const mean = Ls.reduce((a, b) => a + b, 0) / Ls.length, std = Math.sqrt(Ls.reduce((a, b) => a + (b - mean) ** 2, 0) / Ls.length);
+  const cl = (v, lo, hi) => Math.round(Math.min(hi, Math.max(lo, v)));
+  const smooth = (e0, e1, x) => { const u = Math.min(1, Math.max(0, (x - e0) / (e1 - e0))); return u * u * (3 - 2 * u); };
+  Object.assign(st.light, {
+    exposure: Math.round(ev * 100) / 100,
+    contrast: cl((0.2 - std) / 0.2 * 60, -30, 30),
+    highlights: q(0.99) > 0.95 ? -cl((q(0.99) - 0.9) * 300, 0, 60) : 0,
+    shadows: q(0.05) < 0.08 ? cl((0.12 - q(0.05)) * 300, 0, 50) : 0,
+    // 슬라이더가 그 밝기에서 먹히는 비율로 나눔 (Whites: smoothstep(0.5, 1, L), Blacks: 1 − smoothstep(0, 0.4, L))
+    whites: cl((0.97 - q(0.995)) / (0.25 * Math.max(0.2, smooth(0.5, 1, q(0.995)))) * 100, -80, 80),
+    blacks: cl((0.02 - q(0.005)) / (0.2 * Math.max(0.2, 1 - smooth(0, 0.4, q(0.005)))) * 100, -80, 80),
+  });
+  st.color.vibrance = sat / (d.length / 4) < 0.25 ? 15 : 5;
+  st.color.saturation = 0;
+  st.autoExposure = false;   // 노출 값을 슬라이더에 직접 적었으니 자동 노출은 끔
+  syncAll();
+  changed();
+  toast('Auto: 히스토그램 기준으로 톤 8개를 맞춤');
 }
 
 // ---------- 되돌리기·다시 하기 (사진마다, 슬라이더를 움직이다 멈춘 때를 한 단계로) ----------
@@ -203,6 +257,7 @@ async function select(id, ready) {
   app.geomKey = '';
   hist(m);   // 이 사진의 기록 시작점
   updateUndoButtons();
+  scheduleThumbs();
   refreshPreview();
   document.body.classList.add('has-photo');
   syncAll();
@@ -375,8 +430,12 @@ function buildPanel() {
     autoTxt.textContent = '자동 노출' + (app.cur ? ` (${app.cur.autoEV >= 0 ? '+' : ''}${app.cur.autoEV.toFixed(2)} EV)` : '');
   });
 
-  const row1 = el('div', 'btnrow');
   const b = (t, f, cls = '') => { const x = el('button', 'btn ' + cls, t); x.onclick = f; return x; };
+  const quick = el('div', 'btnrow');
+  const bwBtn = b('B&W', () => { if (!app.cur) return; const s = app.cur.settings; s.treatment = s.treatment === 'bw' ? 'color' : 'bw'; syncAll(); changed(); });
+  quick.append(b('Auto', autoTone, 'primary'), bwBtn);
+  app.syncers.push(() => bwBtn.classList.toggle('on', !!app.cur && app.cur.settings.treatment === 'bw'));
+  const row1 = el('div', 'btnrow');
   row1.append(
     b('복사', () => { if (app.cur) { app.clipboard = clone(app.cur.settings); toast('보정을 복사함'); } }),
     b('붙여넣기', () => { if (app.cur && app.clipboard) { adopt(app.clipboard); syncAll(); changed(); } }),
@@ -419,7 +478,33 @@ function buildPanel() {
       if (n && all[n]) { delete all[n]; localStorage.setItem('ls.presets', JSON.stringify(all)); fillPresets(); }
     }));
 
-  P.append(section('기본', null, hist, autoBox, row1, row2, carry, pre));
+  P.append(section('기본', null, hist, quick, autoBox, row1, row2, carry, pre));
+
+  // 프로필
+  const curName = el('div', 'subhead');
+  app.syncers.push(() => {
+    const p = profileById(app.cur?.settings.profile.id);
+    curName.textContent = `${p.name} · ${p.ko}`;
+    for (const [id, cell] of Object.entries(app.profileCells || {})) cell.classList.toggle('on', id === p.id);
+  });
+  app.profileCells = {};
+  const profGroups = PROFILE_GROUPS.map(([g, label]) => {
+    const grid = el('div', 'profiles');
+    for (const p of PROFILES.filter((x) => x.group === g)) {
+      const cell = el('button', 'prof');
+      cell.append(el('span', null, p.name));
+      cell.title = p.ko;
+      cell.onclick = () => { if (!app.cur) return; app.cur.settings.profile.id = p.id; syncAll(); changed(); };
+      app.profileCells[p.id] = cell;
+      grid.append(cell);
+    }
+    return [sub(label), grid];
+  }).flat();
+  P.append(section('프로필', ['profile'], curName,
+    slider({ label: '강도 Amount', path: 'profile.amount', min: 0, max: 200, fmt: (v) => Math.round(v) + ' %' }),
+    ...profGroups,
+    el('div', 'hint', '썸네일은 지금 사진과 지금 보정 위에 각 프로필을 얹은 모습. 프로필은 슬라이더를 움직이지 않고 그 아래에 깔림'),
+  ));
 
   // 자르기·회전
   const G = () => app.cur.settings.geometry;
@@ -471,6 +556,11 @@ function buildPanel() {
     cv,
     el('div', 'hint', '빈 곳을 누르면 점 추가 · 점을 두 번 누르면 삭제'),
     slider({ label: 'Refine Saturation', path: 'curve.refineSat', min: 0, max: 100, fmt: pct }),
+    sub('구간 Region'),
+    slider({ label: 'Highlights', path: 'curve.region.highlights', min: -100, max: 100 }),
+    slider({ label: 'Lights', path: 'curve.region.lights', min: -100, max: 100 }),
+    slider({ label: 'Darks', path: 'curve.region.darks', min: -100, max: 100 }),
+    slider({ label: 'Shadows', path: 'curve.region.shadows', min: -100, max: 100 }),
   ));
 
   // Color
@@ -493,6 +583,12 @@ function buildPanel() {
   P.append(section('Color Mixer', ['mixer'],
     tabs(['Hue', 'Saturation', 'Luminance'], (i) => groups.forEach((g, j) => { g.hidden = j !== i; })),
     ...groups,
+  ));
+
+  // B&W Mix
+  P.append(section('B&W Mix', ['bw'],
+    el('div', 'hint', '흑백(B&W)일 때 색마다 회색 밝기를 바꿈. 예: 파랑 −로 하늘을 어둡게'),
+    ...BANDS.map(([n, col], i) => slider({ label: n, path: `bw.${i}`, min: -100, max: 100, track: `linear-gradient(90deg,#222,${col},#eee)` })),
   ));
 
   // Point Color
