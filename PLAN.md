@@ -35,7 +35,7 @@
 ## 2단계 HDR 방식 (조사 뒤)
 
 - **캔버스가 HDR을 그리면**: Lightroom처럼 HDR 화면에서 바로 편집함(WebGPU `rgba16float` + `toneMapping: extended`)
-- **캔버스가 못 그리면**: 편집은 SDR 화면에서 하고, "HDR 보기"는 보정 결과로 만든 gain map JPEG을 `<img>`로 띄움(Safari 26이 HDR 사진을 HDR로 보여 줌)
+- **캔버스가 못 그리면**: 편집은 SDR 화면에서 하고 "HDR 보기"는 보정 결과로 만든 gain map JPEG을 `<img>`로 띄움(Safari 26이 HDR 사진을 HDR로 보여 줌)
 - **내보내기는 어느 쪽이든**: SDR 기본 그림 + gain map을 ISO 21496-1과 Ultra HDR(XMP hdrgm) 메타데이터로 함께 씀
 - **RAW**: 16비트 선형으로 해독해 1.0을 넘는 하이라이트를 HDR 쪽에 남김
 
