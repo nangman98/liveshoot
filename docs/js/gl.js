@@ -25,6 +25,12 @@ precision highp float;
 in vec2 uv; out vec4 o; uniform sampler2D t;
 void main(){ o = texture(t, uv); }`;
 
+// 첫 축소: 알파에 밝기² (guided filter용 국소 분산 = E[I²] − E[I]²)
+const PREP = `#version 300 es
+precision highp float;
+in vec2 uv; out vec4 o; uniform sampler2D t;
+void main(){ vec3 c = texture(t, uv).rgb; float y = dot(c, vec3(0.2126, 0.7152, 0.0722)); o = vec4(c, y * y); }`;
+
 const MAIN = `#version 300 es
 precision highp float;
 precision highp sampler3D;
@@ -95,7 +101,11 @@ const float SPAN[8] = float[8](0.0833, 0.0833, 0.125, 0.1667, 0.1667, 0.125, 0.0
 void main(){
   vec3 c = texture(uSrc, uv).rgb;
   if (uOriginal > 0.5) { o = vec4(c, 1.0); return; }
-  vec3 s = texture(uS, uv).rgb, m = texture(uM, uv).rgb, l = texture(uL, uv).rgb;
+  vec4 l4 = texture(uL, uv);
+  vec3 s = texture(uS, uv).rgb, m = texture(uM, uv).rgb, l = l4.rgb;
+  // 국소 분산이 큰 곳(보케·밝은 가장자리)은 넓은 주변 대신 좁은 주변을 기준으로 (헤일로 폭을 M 반경으로 줄임)
+  float lm = luma(l), ga = max(l4.a - lm * lm, 0.0);
+  ga = ga / (ga + 0.015);
 
   // Detail: 밝기 노이즈 → 색 노이즈 → 샤픈 → Texture
   if (uNR.x > 0.0) {
@@ -124,10 +134,12 @@ void main(){
   float gain = exp2(uExposure);
   vec3 p = toSrgb(toLin(clamp(c, 0.0, 1.0)) * gain * wb);
   vec3 pl = toSrgb(toLin(l) * gain * wb);   // 주변 밝기 (하이라이트·섀도·Clarity 기준)
+  vec3 pm = toSrgb(toLin(m) * gain * wb);   // 좁은 주변 (밝은 가장자리 근처에서 대신 씀)
   // 가져온 LUT: 노출·화이트밸런스 바로 뒤, 다른 톤 보정 앞 (LUT 제작자 권장 순서)
   if (uLutAmt > 0.0) {
     p = mix(p, lut3(toLin(clamp(c, 0.0, 1.0)) * gain * wb, clamp(p, 0.0, 1.0)), uLutAmt);
     pl = mix(pl, lut3(toLin(l) * gain * wb, clamp(pl, 0.0, 1.0)), uLutAmt);
+    pm = mix(pm, lut3(toLin(m) * gain * wb, clamp(pm, 0.0, 1.0)), uLutAmt);
   }
 
   // Dehaze: 안개 모델 I = J·t + A·(1 − t), 주변의 가장 어두운 채널로 t를 어림 (dark channel prior)
@@ -136,25 +148,32 @@ void main(){
     float t = max(1.0 - uDehaze * 0.9 * min(min(pl.r, pl.g), pl.b) / A, 0.2);
     p = max((p - A) / t + A, 0.0);
     pl = max((pl - A) / t + A, 0.0);
+    pm = max((pm - A) / t + A, 0.0);
   } else if (uDehaze < 0.0) {
     p = mix(p, vec3(0.8), -uDehaze * 0.5);
     pl = mix(pl, vec3(0.8), -uDehaze * 0.5);
+    pm = mix(pm, vec3(0.8), -uDehaze * 0.5);
   }
 
   // 밝기 톤: Clarity → 하이라이트·섀도 → Whites·Blacks → 대비
+  // 검정(0)과 흰색(1)은 제자리에 두는 곡선만 쓴다. 검정을 들어 올리면 검은 화소의 색 노이즈가 비율만큼 커진다.
   float L0 = max(luma(p), 1e-4), L = L0, Ll = luma(pl);
-  L += uClarity * (L - Ll) * 0.8 * (4.0 * L * (1.0 - L));
-  float hm = smoothstep(0.45, 1.0, Ll), sm = 1.0 - smoothstep(0.0, 0.55, Ll);
+  float Lb = mix(Ll, luma(pm), ga);   // 넓은 주변 밝기, 밝은 가장자리 근처는 좁은 주변으로
+  L += uClarity * clamp(L - Lb, -0.2, 0.2) * 1.0 * (4.0 * L * (1.0 - L));
+  float hm = smoothstep(0.45, 1.0, Lb), sm = 1.0 - smoothstep(0.0, 0.55, Lb);
   L += uHighlights * 0.35 * hm * (uHighlights < 0.0 ? L : 1.0 - L);
-  L += uShadows * 0.45 * sm * (uShadows > 0.0 ? 1.0 - L : L);
+  L += uShadows * 0.45 * sm * (uShadows > 0.0 ? (1.0 - L) * smoothstep(0.0, 0.25, L) : L);
   L += uWhites * 0.25 * smoothstep(0.5, 1.0, L);
-  L += uBlacks * 0.2 * (1.0 - smoothstep(0.0, 0.4, L));
-  if (uContrast > 0.0) L = mix(L, smoothstep(0.0, 1.0, L), uContrast);
-  else if (uContrast < 0.0) L = mix(L, 0.5 + (L - 0.5) * 0.5, -uContrast);
+  L += uBlacks * 0.2 * (1.0 - smoothstep(0.0, 0.4, L)) * (uBlacks > 0.0 ? smoothstep(0.0, 0.1, L) : 1.0);
+  // 대비: L + k(L − ½)L(1 − L). k > 0은 smoothstep과 같고, k < 0은 중간 기울기를 낮추되 끝점은 고정
+  L += (uContrast > 0.0 ? 2.0 : 2.4) * uContrast * (L - 0.5) * L * (1.0 - L);
   // 구간 커브 (Lightroom의 parametric curve: 하이라이트·밝은 톤·어두운 톤·섀도)
   L += 0.25 * (uRegion.x * bump(L, 0.875) + uRegion.y * bump(L, 0.625) + uRegion.z * bump(L, 0.375) + uRegion.w * bump(L, 0.125));
   L = clamp(L, 0.0, 1.2);
-  p *= L / L0;
+  // 색은 밝기 비율만큼 늘리되, 어두운 화소를 밝힐 때는 √비율로 줄이고 3배까지만 (노이즈·파란 기운 방지)
+  float r = L / L0;
+  float cs = r <= 1.0 ? r : min(mix(sqrt(r), r, smoothstep(0.05, 0.25, L0)), 3.0);
+  p = L + (p - L0) * cs;
   float mx = max(max(p.r, p.g), p.b);
   if (mx > 1.0) p = mix(vec3(L), p, clamp((1.0 - L) / max(mx - L, 1e-4), 0.0, 1.0));
   p = clamp(p, 0.0, 1.0);
@@ -293,6 +312,8 @@ export class Pipeline {
     this.main = compile(gl, VS, MAIN);
     this.blur = compile(gl, VS, BLUR);
     this.copy = compile(gl, VS, COPY);
+    this.prep = compile(gl, VS, PREP);
+    this.half = !!gl.getExtension('EXT_color_buffer_float') || !!gl.getExtension('EXT_color_buffer_half_float');
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
@@ -305,7 +326,7 @@ export class Pipeline {
     this.set = null;
   }
 
-  tex(w, h, src) {
+  tex(w, h, src, half) {
     const gl = this.gl, t = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, t);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -317,7 +338,7 @@ export class Pipeline {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, src);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     } else {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texImage2D(gl.TEXTURE_2D, 0, half ? gl.RGBA16F : gl.RGBA8, w, h, 0, gl.RGBA, half ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE, null);
     }
     return t;
   }
@@ -346,8 +367,9 @@ export class Pipeline {
     if (old) { this.gl.deleteTexture(old.tex); this.luts.delete(id); }
   }
 
-  target(w, h) {
-    const gl = this.gl, t = this.tex(w, h), fb = gl.createFramebuffer();
+  /** half: 흐림 단계용 16비트 부동소수점 (8비트면 그림자 계조가 끊기고 국소 분산을 못 잰다) */
+  target(w, h, half) {
+    const gl = this.gl, t = this.tex(w, h, null, half && this.half), fb = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
     return { t, fb, w, h };
@@ -378,19 +400,19 @@ export class Pipeline {
     this.free(this.set);
     const gl = this.gl, long = Math.max(w, h);
     const src = this.tex(w, h, source);
-    const S = this.target(w, h), St = this.target(w, h);
+    const S = this.target(w, h, true), St = this.target(w, h, true);
     this.blurInto(src, St, S, sharpRadius * long / 2048);
     let cur = { t: src, w, h };
     const chain = [];
     for (let i = 0; i < 3; i++) {
-      const nx = this.target(Math.max(1, cur.w >> 1), Math.max(1, cur.h >> 1));
-      this.pass(this.copy, nx, [['t', cur.t]]);
+      const nx = this.target(Math.max(1, cur.w >> 1), Math.max(1, cur.h >> 1), true);
+      this.pass(i ? this.copy : this.prep, nx, [['t', cur.t]]);
       chain.push(nx);
       cur = nx;
     }
-    const M = this.target(chain[0].w, chain[0].h), Mt = this.target(chain[0].w, chain[0].h);
+    const M = this.target(chain[0].w, chain[0].h, true), Mt = this.target(chain[0].w, chain[0].h, true);
     this.blurInto(chain[0].t, Mt, M, long / 400 / 2);
-    const L = this.target(chain[2].w, chain[2].h), Lt = this.target(chain[2].w, chain[2].h);
+    const L = this.target(chain[2].w, chain[2].h, true), Lt = this.target(chain[2].w, chain[2].h, true);
     this.blurInto(chain[2].t, Lt, L, long / 60 / 8);
     this.blurInto(L.t, Lt, L, long / 60 / 8);
     this.set = { src, S, St, M, Mt, L, Lt, chain, w, h, sharpRadius };

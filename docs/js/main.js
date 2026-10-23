@@ -6,6 +6,7 @@ import { readExif } from './exif.js';
 import { isRaw, decodeRaw, rawInfo } from './raw.js';
 import { PROFILES, PROFILE_GROUPS, profileById } from './profiles.js';
 import { parseLUTFile, INPUTS } from './lut.js';
+import { parseXMP } from './xmp.js';
 
 // 가져온 LUT 목록 (표 자체는 IndexedDB 'lut:<id>', 목록은 localStorage)
 const lutMeta = () => JSON.parse(localStorage.getItem('ls.luts') || '[]');
@@ -13,7 +14,7 @@ const saveLutMeta = (l) => localStorage.setItem('ls.luts', JSON.stringify(l));
 const allProfiles = () => [...PROFILES, ...lutMeta().map((l) => ({ id: 'lut:' + l.id, name: l.name, ko: 'LUT', group: 'lut' }))];
 import { loadImage, toCanvas, renderJPEG, download, canShareFiles, driveConfig, saveDriveConfig, driveToken, pickDriveFolder, uploadToDrive } from './export.js';
 
-export const VERSION = 'v8';
+export const VERSION = 'v11';
 const PREVIEW = 2048;   // 화면용 긴 변 (px)
 const BASE = 3072;      // 자르기·회전 전에 읽어 두는 원본 (긴 변 px)
 
@@ -112,8 +113,16 @@ function updateProfileThumbs() {
  */
 function autoTone() {
   if (!app.cur) return;
-  const st = app.cur.settings, ev = autoEV(app.preview);
-  const c = toCanvas(app.preview, 160), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  applyAuto(app.cur.settings, app.preview);
+  syncAll();
+  changed();
+  toast('Auto: 히스토그램 기준으로 톤 8개를 맞춤');
+}
+
+/** Auto 값을 st에 적음 (canvas: 보정 전 사진) */
+function applyAuto(st, canvas) {
+  const ev = autoEV(canvas);
+  const c = toCanvas(canvas, 160), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
   const lin = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
   const enc = (v) => (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
   const g = Math.pow(2, ev), Ls = [];
@@ -141,10 +150,18 @@ function autoTone() {
   st.color.vibrance = sat / (d.length / 4) < 0.25 ? 15 : 5;
   st.color.saturation = 0;
   st.autoExposure = false;   // 노출 값을 슬라이더에 직접 적었으니 자동 노출은 끔
-  syncAll();
-  changed();
-  toast('Auto: 히스토그램 기준으로 톤 8개를 맞춤');
 }
+
+// ---------- 자동 처리 (Capture One의 Next Capture Adjustments + Export Recipe + capture-done 스크립트를 본뜸) ----------
+
+export const RECIPES = [
+  { id: 'web', name: '홈페이지 긴 변 2400 px · 품질 85', edge: 2400, q: 85, suffix: '' },
+  { id: 'insta', name: '인스타 긴 변 1350 px · 품질 90', edge: 1350, q: 90, suffix: '_insta' },
+  { id: 'full', name: '원본 크기 · 품질 95', edge: 0, q: 95, suffix: '_full' },
+];
+const allPresets = () => JSON.parse(localStorage.getItem('ls.presets') || '{}');
+const autoCfg = () => ({ preset: '', auto: false, recipes: [], autoExport: false, ...JSON.parse(localStorage.getItem('ls.auto') || '{}') });
+const saveAutoCfg = (c) => localStorage.setItem('ls.auto', JSON.stringify(c));
 
 // ---------- 되돌리기·다시 하기 (사진마다, 슬라이더를 움직이다 멈춘 때를 한 단계로) ----------
 
@@ -231,8 +248,11 @@ async function importFiles(files) {
       }
       const c = toCanvas(img, BASE);
       const thumb = await new Promise((r) => toCanvas(c, 240).toBlob(r, 'image/jpeg', 0.8));
-      const settings = app.carry && app.cur ? clone(app.cur.settings) : startSettings();
+      let settings = app.carry && app.cur ? clone(app.cur.settings) : startSettings();
+      const rule = autoCfg(), rp = rule.preset && allPresets()[rule.preset];
+      if (rp) settings = withDefaults(rp);           // 새 사진에 입힐 프리셋
       settings.geometry = defaults().geometry;
+      if (rule.auto) applyAuto(settings, c);          // 새 사진에 Auto
       const ex = rawMeta ? null : await readExif(f);
       const meta = {
         id: crypto.randomUUID(), name: f.name || `photo_${Date.now()}.jpg`, added: Date.now(),
@@ -248,6 +268,8 @@ async function importFiles(files) {
       n++;
       if (app.follow || !app.cur) await select(meta.id, c);
       else renderStrip();
+      // 받는 즉시 내보내기: Drive 지정 폴더일 때만 (공유·다운로드는 손으로 눌러야 하는 동작이라)
+      if (rule.autoExport && app.dest === 'drive' && driveConfig().folderId) exportPhotos([meta], true);
     } catch (e) {
       toast(isRaw(f) ? `RAW를 열 수 없음: ${f.name} (${e.message})` : `열 수 없는 사진: ${f.name}`);
     }
@@ -504,6 +526,42 @@ function lutGroup() {
   return box;
 }
 
+function autoSection() {
+  const cfg = autoCfg(), put = (k, v) => saveAutoCfg({ ...autoCfg(), [k]: v });
+  const ps = el('select');
+  const fill = () => {
+    ps.replaceChildren(el('option', null, '프리셋 없음'));
+    ps.firstChild.value = '';
+    for (const k of Object.keys(allPresets())) { const o = el('option', null, k); o.value = k; ps.append(o); }
+    ps.value = autoCfg().preset || '';
+  };
+  fill();
+  ps.addEventListener('focus', fill);
+  ps.onchange = () => put('preset', ps.value);
+  const chk = (label, key) => {
+    const l = el('label', 'chk'), i = el('input');
+    i.type = 'checkbox'; i.checked = !!cfg[key];
+    i.onchange = () => put(key, i.checked);
+    l.append(i, el('span', null, label));
+    return l;
+  };
+  const rec = el('div', null);
+  for (const r of RECIPES) {
+    const l = el('label', 'chk'), i = el('input');
+    i.type = 'checkbox'; i.checked = cfg.recipes.includes(r.id);
+    i.onchange = () => { const s = new Set(autoCfg().recipes); i.checked ? s.add(r.id) : s.delete(r.id); put('recipes', [...s]); };
+    l.append(i, el('span', null, r.name));
+    rec.append(l);
+  }
+  const row = el('div', 'btnrow');
+  row.append(el('span', null, '새 사진에 입힐 프리셋'), ps);
+  return section('자동 처리', null,
+    row, chk('새 사진에 Auto', 'auto'),
+    sub('내보내기 레시피 (고르면 레시피마다 한 장씩)'), rec,
+    chk('받는 즉시 내보내기 (보낼 곳이 Google Drive 지정 폴더일 때)', 'autoExport'),
+    el('div', 'hint', 'Capture One의 "다음 촬영에 보정 입히기 + 내보내기 레시피 여러 개 + 촬영할 때마다 실행"을 본뜸. 레시피를 하나도 안 고르면 아래 내보내기의 크기·품질을 씀'));
+}
+
 function buildPanel() {
   const P = $('#panel');
 
@@ -566,8 +624,35 @@ function buildPanel() {
       const n = prompt('지울 프리셋 이름\n' + names.join(', '));
       if (n && all[n]) { delete all[n]; localStorage.setItem('ls.presets', JSON.stringify(all)); fillPresets(); }
     }));
+  // Lightroom·Camera Raw 프리셋(.xmp) 가져오기
+  const xr = el('div', 'btnrow');
+  const xl = el('label', 'btn', 'Lightroom 프리셋 가져오기 (.xmp)');
+  const xi = el('input');
+  Object.assign(xi, { type: 'file', multiple: true, hidden: true });   // accept 없음: iPad가 .xmp를 흐리게 할 수 있음
+  xi.dataset.role = 'xmp-import';
+  xl.append(xi);
+  xi.onchange = async () => {
+    const msgs = [];
+    for (const f of xi.files) {
+      try {
+        const r = parseXMP(await f.text());
+        const name = f.name.replace(/\.[^.]+$/, '');
+        const all = presets(); all[name] = r.settings;
+        localStorage.setItem('ls.presets', JSON.stringify(all));
+        if (app.cur && xi.files.length === 1) { adopt(r.settings); syncAll(); changed(); }
+        msgs.push(`'${name}' ${r.used.length}개 항목` + (r.skipped.length ? `, 못 옮김 ${r.skipped.length}개(${r.skipped.slice(0, 6).join(', ')}${r.skipped.length > 6 ? ' …' : ''})` : ''));
+      } catch (e) {
+        msgs.push(`${f.name}: ${e.message}`);
+      }
+    }
+    xi.value = '';
+    fillPresets();
+    toast('프리셋 가져옴: ' + msgs.join(' / '));
+  };
+  xr.append(xl);
 
-  P.append(section('기본', null, hist, quick, autoBox, row1, row2, carry, pre));
+  P.append(section('기본', null, hist, quick, autoBox, row1, row2, carry, pre, xr));
+  P.append(autoSection());
 
   // 프로필
   const curName = el('div', 'subhead');
@@ -845,21 +930,28 @@ function buildExport() {
     el('div', 'hint', '원본에서 다시 그려 JPEG로 만듭니다. 촬영 날짜·카메라 정보(원본이 JPEG일 때)는 함께 저장되고, 원본은 바뀌지 않습니다.'));
 }
 
-async function exportPhotos(list) {
+async function exportPhotos(list, auto = false) {
   try {
     if (app.dest === 'drive') await driveToken();   // 누른 순간에 로그인 창
+    // 고른 레시피가 있으면 레시피마다 한 장씩, 없으면 위 크기·품질로
+    const chosen = RECIPES.filter((r) => autoCfg().recipes.includes(r.id));
+    const jobs = chosen.length ? chosen : [{ edge: app.exportEdge, q: app.quality, suffix: '' }];
     const files = [];
-    for (const [i, m] of list.entries()) {
-      toast(`내보내는 중 ${i + 1}/${list.length}`);
+    let k = 0;
+    for (const m of list) {
       const blob = await store.getBlob(m.id);
-      const r = await renderJPEG(app.pipe, m, blob, app.exportEdge, app.quality, app.keepGPS);
-      if (app.dest === 'drive') await uploadToDrive(r.file);
-      files.push(r);
+      for (const j of jobs) {
+        toast(`내보내는 중 ${++k}/${list.length * jobs.length}`);
+        const r = await renderJPEG(app.pipe, m, blob, j.edge, j.q, app.keepGPS);
+        if (j.suffix) r.file = new File([r.file], r.file.name.replace(/\.jpg$/, j.suffix + '.jpg'), { type: 'image/jpeg' });
+        if (app.dest === 'drive') await uploadToDrive(r.file);
+        files.push(r);
+      }
       m.exported = true;
       store.putMeta(m);
     }
     renderStrip();
-    const info = `${files.length}장 · 긴 변 ${Math.max(files[0].w, files[0].h)} px · 품질 ${app.quality}`;
+    const info = `${files.length}개 파일` + (chosen.length ? ` · 레시피 ${chosen.length}개` : ` · 긴 변 ${Math.max(files[0].w, files[0].h)} px · 품질 ${app.quality}`) + (auto ? ' · 자동' : '');
     const fl = files.map((f) => f.file);
     window.__lastExport = files;
     if (app.dest === 'drive') toast(`Drive '${driveConfig().folderName}'에 올림: ${info}`);
@@ -1010,7 +1102,7 @@ async function main() {
       return importFiles([new File([b], name || url.split('/').pop(), { type: b.type || 'image/jpeg' })]);
     },
   };
-  window.__ls = Object.assign(app, { rerender: () => { syncAll(); changed(); }, select, store });   // 시험용
+  window.__ls = Object.assign(app, { rerender: () => { syncAll(); changed(); }, select, store, exportPhotos });   // 시험용
 
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
     // 새로고침을 강제하지 않는다 (사진을 고르는 중일 수 있음). sw.js가 네트워크 먼저라 열 때마다 최신판을 받는다.
