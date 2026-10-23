@@ -1,0 +1,18 @@
+name: iOS build check
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode and SDK
+        run: xcodebuild -version && xcrun --sdk iphoneos --show-sdk-version
+      - name: Typecheck app sources against the iOS SDK
+        working-directory: LiveShoot.swiftpm
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun swiftc -typecheck -parse-as-library -swift-version 5 \
+            -sdk "$SDK" -target arm64-apple-ios16.0 \
+            $(ls *.swift | grep -v '^Package.swift$')
