@@ -1,5 +1,5 @@
 // 내보내기: 원본에서 다시 그려 JPEG로 만들고, 공유 시트·다운로드·Google Drive 폴더로 보낸다.
-import { renderGeometry, geomPlan, geomRows } from './geometry.js';
+import { renderGeometry, geomPlan, geomRows, maskFrame } from './geometry.js';
 import { readExif, prepare, insertExif, buildExif } from './exif.js';
 import { decodeRaw } from './raw.js';
 
@@ -58,10 +58,13 @@ export async function renderJPEG(pipe, meta, blob, edge, quality, keepGPS = true
   let out, c;
   if (hi) {
     c = { width: hi.plan.w, height: hi.plan.h };
-    try { out = withLook(pipe, meta, () => pipe.renderFull({ hiTex: hi, ...hi.rows }, c.width, c.height, meta.settings, meta.autoEV)); } finally { pipe.dropHi(hi); }
+    const frame = maskFrame(hi.w, hi.h, hi.plan);
+    try { out = withLook(pipe, meta, () => pipe.renderFull({ hiTex: hi, ...hi.rows }, c.width, c.height, meta.settings, meta.autoEV, frame)); } finally { pipe.dropHi(hi); }
   } else {
+    const sw = src.naturalWidth || src.width, sh = src.naturalHeight || src.height;
     c = renderGeometry(src, meta.settings.geometry, maxEdge, { maxArea: MAX_AREA });
-    out = withLook(pipe, meta, () => pipe.renderFull(c, c.width, c.height, meta.settings, meta.autoEV));
+    const frame = maskFrame(sw, sh, geomPlan(sw, sh, meta.settings.geometry, maxEdge, { maxArea: MAX_AREA }));
+    out = withLook(pipe, meta, () => pipe.renderFull(c, c.width, c.height, meta.settings, meta.autoEV, frame));
   }
   let jpg = await new Promise((r) => out.toBlob(r, 'image/jpeg', quality / 100));
   if (seg) jpg = await insertExif(jpg, seg);

@@ -1,21 +1,49 @@
 import { Pipeline } from './gl.js';
 import { store, defaults, withDefaults, clone } from './store.js';
 import { CurveEditor } from './curve.js';
-import { renderGeometry, geomPlan, geomRows, frameSize, aspectRatio, maxCrop, CropBox, ASPECTS } from './geometry.js';
+import { renderGeometry, geomPlan, geomRows, maskFrame, frameSize, aspectRatio, maxCrop, CropBox, ASPECTS } from './geometry.js';
 import { readExif } from './exif.js';
 import { isRaw, decodeRaw, rawInfo, rawTiffInfo } from './raw.js';
 import { fitCameraLook } from './camera.js';
-import { PROFILES, PROFILE_GROUPS, profileById } from './profiles.js';
+import { PROFILES, PROFILE_GROUPS, profileById, effective } from './profiles.js';
 import { parseLUTFile, INPUTS } from './lut.js';
 import { parseXMP } from './xmp.js';
+import { BUILTIN_PRESETS, BUILTIN_GROUPS, applyBuiltin } from './presets.js';
+import { SHAPES, OPS, ADJUST, MAX_MASKS, MAX_COMPS, newMask, newShape, oklab } from './masks.js';
 
 // 가져온 LUT 목록 (표 자체는 IndexedDB 'lut:<id>', 목록은 localStorage)
 const lutMeta = () => JSON.parse(localStorage.getItem('ls.luts') || '[]');
 const saveLutMeta = (l) => localStorage.setItem('ls.luts', JSON.stringify(l));
+// 프로필 즐겨찾기·최근 (LightCraft처럼 최근 5개)
+const profFav = () => JSON.parse(localStorage.getItem('ls.profFav') || '[]');
+const profRecent = () => JSON.parse(localStorage.getItem('ls.profRecent') || '[]');
+function useProfile(id) {
+  if (!app.cur) return;
+  app.cur.settings.profile.id = id;
+  localStorage.setItem('ls.profRecent', JSON.stringify([id, ...profRecent().filter((x) => x !== id)].slice(0, 5)));
+  const p = allProfiles().find((x) => x.id === id);
+  nextLabel('프로필 ' + (p ? p.name : id));
+  syncAll(); changed();
+}
+function toggleFav(id) {
+  const f = profFav();
+  localStorage.setItem('ls.profFav', JSON.stringify(f.includes(id) ? f.filter((x) => x !== id) : [...f, id]));
+  syncAll();
+}
+/** 프로필 칸 + ☆ 단추를 감싼 칸 (별은 칸 단추와 나란한 단추: 키보드·화면 읽기에서도 따로 누름) */
+function starOf(id, cell, name) {
+  const wrap = el('div', 'profwrap'), s = el('button', 'star', '☆');
+  s.type = 'button';
+  s.setAttribute('aria-label', `${name} 즐겨찾기`);
+  s.onclick = () => toggleFav(id);
+  wrap.append(cell, s);
+  app.syncers.push(() => { const on = profFav().includes(id); s.textContent = on ? '★' : '☆'; s.classList.toggle('on', on); s.setAttribute('aria-pressed', on ? 'true' : 'false'); });
+  return wrap;
+}
 const allProfiles = () => [...PROFILES, ...lutMeta().map((l) => ({ id: 'lut:' + l.id, name: l.name, ko: 'LUT', group: 'lut' }))];
 import { loadImage, toCanvas, renderJPEG, download, canShareFiles, driveConfig, saveDriveConfig, driveToken, pickDriveFolder, uploadToDrive } from './export.js';
 
-export const VERSION = 'v12';
+export const VERSION = 'v13';
 const PREVIEW = 2048;   // 화면용 긴 변 (px)
 const BASE = 3072;      // 자르기·회전 전에 읽어 두는 원본 (긴 변 px)
 
@@ -115,6 +143,7 @@ function updateProfileThumbs() {
 function autoTone() {
   if (!app.cur) return;
   applyAuto(app.cur.settings, shown(app.preview, app.cur.look, 256));
+  nextLabel('Auto');
   syncAll();
   changed();
   toast('Auto: 히스토그램 기준으로 톤 8개를 맞춤');
@@ -176,40 +205,77 @@ const saveAutoCfg = (c) => localStorage.setItem('ls.auto', JSON.stringify(c));
 
 // ---------- 되돌리기·다시 하기 (사진마다, 슬라이더를 움직이다 멈춘 때를 한 단계로) ----------
 
+// 사진마다 상태 목록 states[0…], 지금 위치 pos, 각 단계에 무엇을 바꿨는지 이름 labels[i] (states[i−1] → states[i])
 const histories = new Map();
 let histTimer;
+const LABELS = new Map();   // 설정 경로 → 슬라이더 이름 (slider()가 등록)
+const GROUP_NAMES = { profile: '프로필', geometry: '자르기·회전', curve: '커브', mixer: 'Color Mixer', grading: 'Color Grading', point: 'Point Color',
+  bw: 'B&W Mix', treatment: '흑백', autoExposure: '자동 노출', light: 'Light', color: 'Color', effects: 'Effects', detail: 'Detail', masks: '마스크' };
 function hist(m) {
-  if (!histories.has(m.id)) histories.set(m.id, { undo: [], redo: [], last: JSON.stringify(m.settings) });
+  if (!histories.has(m.id)) histories.set(m.id, { states: [JSON.stringify(m.settings)], labels: ['처음'], ids: [app.histSeq = (app.histSeq || 0) + 1], pos: 0 });
   return histories.get(m.id);
 }
+/** 두 설정의 차이를 이름으로 ("노출 Exposure", "대비 Contrast 외 2개") */
+function diffLabel(a, b) {
+  const ch = [];
+  const walk = (x, y, p) => {
+    if (typeof x !== 'object' || x === null || typeof y !== 'object' || y === null) { if (JSON.stringify(x) !== JSON.stringify(y)) ch.push(p); return; }
+    for (const k of new Set([...Object.keys(x), ...Object.keys(y)])) walk(x[k], y[k], p ? p + '.' + k : k);
+  };
+  walk(a, b, '');
+  const name = (p) => { for (let q = p; q; q = q.includes('.') ? q.slice(0, q.lastIndexOf('.')) : '') if (LABELS.has(q)) return LABELS.get(q); return GROUP_NAMES[p.split('.')[0]] || p; };
+  const names = [...new Set(ch.map(name))];
+  return names.length > 2 ? `${names.slice(0, 2).join(', ')} 외 ${names.length - 2}개` : names.join(', ') || '변경';
+}
 function scheduleRecord(m) { clearTimeout(histTimer); histTimer = setTimeout(() => recordHistory(m), 350); }
+/** 다음에 기록할 단계의 이름 (지금 사진에만 붙음) */
+function nextLabel(label) { app.pendingLabel = app.cur ? { id: app.cur.id, label } : null; }
 function recordHistory(m) {
-  const h = hist(m), now = JSON.stringify(m.settings);
-  if (now === h.last) return;
-  h.undo.push(h.last);
-  if (h.undo.length > 200) h.undo.shift();
-  h.redo = [];
-  h.last = now;
+  const h = hist(m), now = JSON.stringify(m.settings), last = h.states[h.pos];
+  const given = app.pendingLabel && app.pendingLabel.id === m.id ? app.pendingLabel.label : null;
+  if (app.pendingLabel && app.pendingLabel.id === m.id) app.pendingLabel = null;   // 바뀐 것이 없어도 소비
+  if (now === last) return;
+  const label = given || diffLabel(JSON.parse(last), m.settings);
+  h.states.length = h.labels.length = h.ids.length = h.pos + 1;   // 되돌린 뒤 새로 바꾸면 그 뒤는 버림
+  h.states.push(now); h.labels.push(label); h.ids.push(app.histSeq = (app.histSeq || 0) + 1); h.pos++;
+  if (h.states.length > 200) { h.states.shift(); h.labels.shift(); h.ids.shift(); h.pos--; h.labels[0] = '처음'; }
   updateUndoButtons();
 }
-function stepHistory(back) {
+/** 히스토리 단계로. at: 단계 id (목록에서 누른 줄) 또는 { step: ±1 } (되돌리기·다시 하기) */
+function jumpHistory(at) {
   if (!app.cur) return;
   clearTimeout(histTimer);
-  recordHistory(app.cur);   // 아직 기록 안 된 마지막 움직임부터 기록
-  const h = hist(app.cur), from = back ? h.undo : h.redo, to = back ? h.redo : h.undo;
-  if (!from.length) return;
-  to.push(h.last);
-  h.last = from.pop();
-  app.cur.settings = JSON.parse(h.last);
+  recordHistory(app.cur);   // 아직 기록 안 된 마지막 움직임부터 기록 (앞 단계가 밀릴 수 있어 id로 다시 찾음)
+  const h = hist(app.cur);
+  const i = typeof at === 'object' ? h.pos + at.step : h.ids.indexOf(at);
+  if (i < 0 || i >= h.states.length || i === h.pos) return;
+  h.pos = i;
+  app.cur.settings = JSON.parse(h.states[i]);
   syncAll();
   changed(false);
   if (app.cropping) showCropBox();
   updateUndoButtons();
 }
+function stepHistory(back) { jumpHistory({ step: back ? -1 : 1 }); }
 function updateUndoButtons() {
   const h = app.cur && hist(app.cur);
-  $('#undoBtn').disabled = !h || !h.undo.length;
-  $('#redoBtn').disabled = !h || !h.redo.length;
+  $('#undoBtn').disabled = !h || h.pos === 0;
+  $('#redoBtn').disabled = !h || h.pos >= h.states.length - 1;
+  renderHistory();
+}
+/** 히스토리 목록 (최근이 위). 지금 위치보다 뒤(다시 하기로 갈 수 있는 단계)는 흐리게 */
+function renderHistory() {
+  const box = app.histBox;
+  if (!box) return;
+  box.replaceChildren();
+  if (!app.cur) return;
+  const h = hist(app.cur);
+  for (let i = h.states.length - 1; i >= 0; i--) {
+    const r = el('button', 'hrow' + (i === h.pos ? ' on' : i > h.pos ? ' future' : ''), h.labels[i]);
+    const hid = h.ids[i];
+    r.onclick = () => jumpHistory(hid);
+    box.append(r);
+  }
 }
 
 let raf = 0, histT = 0;
@@ -385,6 +451,10 @@ function refreshPreview() {
   const src = app.hi && app.hiId === m.id
     ? { hiTex: app.hi, ...geomRows(app.hi.w, app.hi.h, geomPlan(app.hi.w, app.hi.h, g, 0, { ignoreCrop: app.cropping, size: [W, H] })) }
     : app.preview;
+  // 마스크 좌표: 원본 기준 (자르기 편집 중에는 자르기 전 틀)
+  const bw = app.base.width, bh = app.base.height;
+  app.pipe.frame = maskFrame(bw, bh, geomPlan(bw, bh, g, 0, { ignoreCrop: app.cropping, size: [W, H] }));
+  app.frame = app.pipe.frame;
   app.pipe.setPreview(src, W, H, m.settings.detail.sharpen.radius);
   app.geomKey = geomKey();
   if (app.cropping) requestAnimationFrame(() => showCropBox());
@@ -452,6 +522,7 @@ function syncAll() { for (const f of app.syncers) f(); if (app.curve) app.curve.
 
 function slider({ label, path, min, max, step = 1, fmt, track }) {
   const def = getP(defaults(), path);
+  LABELS.set(path, label);
   const row = el('div', 'sl');
   const top = el('div', 'sl-top'), name = el('span', 'sl-name', label), val = el('span', 'sl-val');
   const input = el('input');
@@ -515,9 +586,10 @@ function tabs(names, onPick) {
 
 /** 다른 사진의 보정을 입힌다. 자르기·회전은 지금 사진 것을 둔다 (Lightroom과 같음) */
 function adopt(st) {
-  const g = app.cur.settings.geometry;
+  const g = app.cur.settings.geometry, mk = app.cur.settings.masks;
   app.cur.settings = withDefaults(st);
   app.cur.settings.geometry = g;
+  app.cur.settings.masks = mk;   // 마스크도 사진마다 (Lightroom 복사 기본값과 같음)
 }
 
 /** "내 LUT" 묶음: .cube·HaldCLUT 가져오기, 입력 방식, 지우기 */
@@ -542,9 +614,9 @@ function lutGroup() {
     for (const l of m) {
       const cell = el('button', 'prof');
       cell.append(el('span', null, l.name));
-      cell.onclick = () => { if (!app.cur) return; app.cur.settings.profile.id = 'lut:' + l.id; syncAll(); changed(); };
+      cell.onclick = () => useProfile('lut:' + l.id);
       app.profileCells['lut:' + l.id] = cell;
-      grid.append(cell);
+      grid.append(starOf('lut:' + l.id, cell, l.name));
       const row = el('div', 'btnrow'), s = el('select');
       for (const [v, t] of INPUTS) { const o = el('option', null, t); o.value = v; s.append(o); }
       s.value = l.input;
@@ -655,8 +727,8 @@ function buildPanel() {
   const row1 = el('div', 'btnrow');
   row1.append(
     b('복사', () => { if (app.cur) { app.clipboard = clone(app.cur.settings); toast('보정을 복사함'); } }),
-    b('붙여넣기', () => { if (app.cur && app.clipboard) { adopt(app.clipboard); syncAll(); changed(); } }),
-    b('전체 초기화', () => { if (app.cur) { app.cur.settings = defaults(); syncAll(); changed(); } }),
+    b('붙여넣기', () => { if (app.cur && app.clipboard) { adopt(app.clipboard); nextLabel('붙여넣기'); syncAll(); changed(); } }),
+    b('전체 초기화', () => { if (app.cur) { app.cur.settings = defaults(); nextLabel('전체 초기화'); syncAll(); changed(); } }),
   );
   const row2 = el('div', 'btnrow');
   row2.append(
@@ -667,35 +739,72 @@ function buildPanel() {
   carryIn.onchange = () => { app.carry = carryIn.checked; localStorage.setItem('ls.carry', app.carry ? '1' : '0'); };
   carry.append(carryIn, el('span', null, '새 사진에 지금 보정 이어 쓰기'));
 
-  // 프리셋
-  const pre = el('div', 'btnrow');
-  const sel = el('select');
+  // 프리셋: 묶음별 목록 (내 프리셋 · 가져온 Lightroom 프리셋 · LightCraft 기본 41개)
   const presets = () => JSON.parse(localStorage.getItem('ls.presets') || '{}');
+  const pgroups = () => JSON.parse(localStorage.getItem('ls.presetGroups') || '{}');
+  // 저장 키는 "묶음/이름" (묶음이 다르면 같은 이름도 따로). 묶음 없는 예전 프리셋은 이름 그대로
+  const savePreset = (name, st, group) => {
+    const key = group ? `${group}/${name}` : name;
+    const all = presets(); all[key] = st; localStorage.setItem('ls.presets', JSON.stringify(all));
+    const gm = pgroups(); if (group) gm[key] = group; else delete gm[key]; localStorage.setItem('ls.presetGroups', JSON.stringify(gm));
+    return key;
+  };
+  const presetBox = el('div');
+  const openPG = new Set(JSON.parse(localStorage.getItem('ls.presetOpen') || '[]'));
   const fillPresets = () => {
-    sel.replaceChildren(el('option', null, '프리셋 고르기'));
-    for (const k of Object.keys(presets())) { const o = el('option', null, k); o.value = k; sel.append(o); }
+    presetBox.replaceChildren();
+    const user = presets(), gm = pgroups(), groups = new Map([['내 프리셋', []]]);
+    for (const key of Object.keys(user)) {
+      const g = gm[key] || '내 프리셋', name = gm[key] && key.startsWith(gm[key] + '/') ? key.slice(gm[key].length + 1) : key;
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push({ name, key, user: true });
+    }
+    for (const g of BUILTIN_GROUPS) groups.set(g, (groups.get(g) || []).concat(BUILTIN_PRESETS.filter((p) => p.group === g).map((p) => ({ name: p.name, builtin: p }))));
+    for (const [g, items] of groups) {
+      if (!items.length) continue;
+      const d = el('details', 'pgroup');
+      d.open = openPG.has(g);
+      d.addEventListener('toggle', () => { if (d.open) openPG.add(g); else openPG.delete(g); localStorage.setItem('ls.presetOpen', JSON.stringify([...openPG])); });
+      const sm = el('summary', null);
+      sm.append(el('span', null, g), el('span', 'muted', String(items.length)));
+      d.append(sm);
+      for (const it of items) {
+        const row = el('div', 'prow'), nb = el('button', 'pname', it.name);
+        nb.onclick = () => {
+          if (!app.cur) return;
+          if (it.builtin) applyBuiltin(app.cur.settings, it.builtin); else adopt(presets()[it.key]);
+          nextLabel('프리셋 ' + it.name);
+          syncAll(); changed(); toast(`프리셋 '${it.name}' 적용`);
+        };
+        row.append(nb);
+        if (it.user) {
+          const x = el('button', 'mini', '지우기');
+          x.onclick = () => {
+            if (!confirm(`프리셋 '${it.name}'을 지울까요?`)) return;
+            const all = presets(); delete all[it.key]; localStorage.setItem('ls.presets', JSON.stringify(all));
+            const gm2 = pgroups(); delete gm2[it.key]; localStorage.setItem('ls.presetGroups', JSON.stringify(gm2));
+            fillPresets();
+          };
+          row.append(x);
+        }
+        d.append(row);
+      }
+      presetBox.append(d);
+    }
   };
   fillPresets();
-  sel.onchange = () => {
-    const p = presets()[sel.value];
-    if (p && app.cur) { adopt(p); syncAll(); changed(); toast(`프리셋 '${sel.value}' 적용`); }
-    sel.selectedIndex = 0;
-  };
-  pre.append(sel,
-    b('저장', () => {
-      if (!app.cur) return;
-      const n = prompt('프리셋 이름');
-      if (!n) return;
-      const all = presets(); all[n] = app.cur.settings;
-      localStorage.setItem('ls.presets', JSON.stringify(all)); fillPresets();
-    }),
-    b('삭제', () => {
-      const all = presets(), names = Object.keys(all);
-      const n = prompt('지울 프리셋 이름\n' + names.join(', '));
-      if (n && all[n]) { delete all[n]; localStorage.setItem('ls.presets', JSON.stringify(all)); fillPresets(); }
-    }));
+  const pre = el('div', 'btnrow');
+  pre.append(b('+ 지금 보정을 프리셋으로', () => {
+    if (!app.cur) return;
+    const n = prompt('프리셋 이름 (묶음/이름 으로 쓰면 그 묶음에 넣음)');
+    if (!n || !n.trim()) return;
+    const k = n.indexOf('/'), group = k > 0 ? n.slice(0, k).trim() : null, name = (k > 0 ? n.slice(k + 1) : n).trim();
+    if (!name) return;
+    savePreset(name, clone(app.cur.settings), group);
+    fillPresets();
+    toast(`프리셋 '${name}' 저장`);
+  }));
   // Lightroom·Camera Raw 프리셋(.xmp) 가져오기
-  const xr = el('div', 'btnrow');
   const xl = el('label', 'btn', 'Lightroom 프리셋 가져오기 (.xmp)');
   const xi = el('input');
   Object.assign(xi, { type: 'file', multiple: true, hidden: true });   // accept 없음: iPad가 .xmp를 흐리게 할 수 있음
@@ -707,9 +816,8 @@ function buildPanel() {
       try {
         const r = parseXMP(await f.text());
         const name = f.name.replace(/\.[^.]+$/, '');
-        const all = presets(); all[name] = r.settings;
-        localStorage.setItem('ls.presets', JSON.stringify(all));
-        if (app.cur && xi.files.length === 1) { adopt(r.settings); syncAll(); changed(); }
+        savePreset(name, r.settings, r.group || 'Lightroom');
+        if (app.cur && xi.files.length === 1) { adopt(r.settings); nextLabel('프리셋 ' + name); syncAll(); changed(); }
         msgs.push(`'${name}' ${r.used.length}개 항목` + (r.skipped.length ? `, 못 옮김 ${r.skipped.length}개(${r.skipped.slice(0, 6).join(', ')}${r.skipped.length > 6 ? ' …' : ''})` : ''));
       } catch (e) {
         msgs.push(`${f.name}: ${e.message}`);
@@ -719,17 +827,42 @@ function buildPanel() {
     fillPresets();
     toast('프리셋 가져옴: ' + msgs.join(' / '));
   };
-  xr.append(xl);
+  pre.append(xl);
 
-  P.append(section('기본', null, hist, quick, autoBox, row1, row2, carry, pre, xr));
+  P.append(section('기본', null, hist, quick, autoBox, row1, row2, carry));
+  P.append(section('프리셋', null, pre, presetBox,
+    el('div', 'hint', '누르면 그 프리셋에 든 항목만 바뀜 (내 프리셋·Lightroom 프리셋은 전체). 기본 묶음 41개는 LightCraft의 기본 프리셋 (MIT OR Apache-2.0)')));
+  app.histBox = el('div', 'hlist');
+  P.append(section('히스토리', null, app.histBox, el('div', 'hint', '누르면 그 단계로 돌아감. 흐린 줄은 되돌린 단계 (다시 하기로 갈 수 있음)')));
   P.append(autoSection());
 
-  // 프로필
+  // 프로필: 빠른 메뉴 (즐겨찾기 · 최근 · 묶음) + 아래 썸네일 격자(찾아보기)
   const curName = el('div', 'subhead');
+  const quickSel = el('select', 'profsel');
+  quickSel.onchange = () => { if (quickSel.value) useProfile(quickSel.value); };
+  const fillQuick = (cur) => {
+    const all = allProfiles(), byId = new Map(all.map((p) => [p.id, p]));
+    quickSel.replaceChildren();
+    const og = (label, ids) => {
+      const list = ids.map((i) => byId.get(i)).filter(Boolean);
+      if (!list.length) return;
+      const g = el('optgroup'); g.label = label;
+      for (const p of list) { const o = el('option', null, p.name); o.value = p.id; g.append(o); }
+      quickSel.append(g);
+    };
+    og('즐겨찾기', profFav());
+    og('최근', profRecent());
+    for (const [g, label] of PROFILE_GROUPS) og(label, all.filter((p) => p.group === g).map((p) => p.id));
+    og('내 LUT', all.filter((p) => p.group === 'lut').map((p) => p.id));
+    // 지금 프로필이 맨 처음 같은 이름으로 선택되게 (즐겨찾기·최근에 있으면 그 줄)
+    const opt = [...quickSel.options].find((o) => o.value === cur);
+    if (opt) opt.selected = true;
+  };
   app.syncers.push(() => {
     const id = app.cur?.settings.profile.id;
     const p = allProfiles().find((x) => x.id === id) || profileById('color');
     curName.textContent = `${p.name} · ${p.ko}`;
+    fillQuick(p.id);
     for (const [id, cell] of Object.entries(app.profileCells || {})) cell.classList.toggle('on', id === p.id);
   });
   app.profileCells = {};
@@ -747,13 +880,13 @@ function buildPanel() {
       const cell = el('button', 'prof');
       cell.append(el('span', null, p.name));
       cell.title = p.ko;
-      cell.onclick = () => { if (!app.cur) return; app.cur.settings.profile.id = p.id; syncAll(); changed(); };
+      cell.onclick = () => useProfile(p.id);
       app.profileCells[p.id] = cell;
-      grid.append(cell);
+      grid.append(starOf(p.id, cell, p.name));
     }
     return box;
   });
-  P.append(section('프로필', ['profile'], curName,
+  P.append(section('프로필', ['profile'], curName, quickSel,
     slider({ label: '강도 Amount', path: 'profile.amount', min: 0, max: 200, fmt: (v) => Math.round(v) + ' %' }),
     ...profGroups,
     lutGroup(),
@@ -921,6 +1054,8 @@ function buildPanel() {
 
   P.append(buildExport());
 
+  P.append(section('마스크', null, maskSection()));
+
   // 보관
   P.append(section('보관', null,
     el('div', 'hint', '가져온 원본과 보정값은 이 iPad 브라우저 안에만 있습니다.'),
@@ -1035,15 +1170,213 @@ async function exportPhotos(list, auto = false) {
 
 // ---------- 스포이트·원본 비교·고객 보기 ----------
 
+// ---------- 마스크 (국소 보정) ----------
+
+const curMask = () => app.cur && app.cur.settings.masks[app.maskSel ?? -1];
+const curComp = () => { const m = curMask(); return m && m.comps[Math.min(app.maskComp || 0, m.comps.length - 1)]; };
+/** 사진 위 조작이 필요한 성분(선형·원형·브러시)이 골라져 있으면 그 모양 */
+const editShape = () => { const c = curComp(); return c && ['linear', 'radial', 'brush'].includes(c.shape.type) ? c.shape : null; };
+const BRUSH = { size: 0.04, feather: 60, flow: 60, erase: false };
+
+/** 화면 좌표 → 원본 uv (마스크 좌표) */
+function srcAt(e) {
+  const r = $('#gl').getBoundingClientRect(), F = app.frame;
+  const o = [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height, 1];
+  return [F.row0[0] * o[0] + F.row0[1] * o[1] + F.row0[2], F.row1[0] * o[0] + F.row1[1] * o[1] + F.row1[2]];
+}
+
+function maskSection() {
+  const root = el('div', 'masks');
+  const mini = (label, get, set, min, max, step = 1, fmt) => {
+    const row = el('div', 'sl'), top = el('div', 'sl-top'), val = el('span', 'sl-val'), input = el('input');
+    Object.assign(input, { type: 'range', min, max, step, value: get() });
+    const show = () => { val.textContent = fmt ? fmt(+input.value) : (+input.value > 0 ? '+' : '') + (step < 1 ? (+input.value).toFixed(2) : Math.round(+input.value)); };
+    input.oninput = () => { set(+input.value); show(); changed(); };
+    show();
+    top.append(el('span', 'sl-name', label), val);
+    row.append(top, input);
+    return row;
+  };
+  const btn = (t, f, cls = '') => { const x = el('button', 'btn ' + cls, t); x.type = 'button'; x.onclick = f; return x; };
+  const render = () => {
+    root.replaceChildren();
+    if (!app.cur) { root.append(el('div', 'hint', '사진을 고르면 마스크를 만들 수 있음')); return; }
+    const masks = app.cur.settings.masks;
+    if (app.maskSel != null && !masks[app.maskSel]) app.maskSel = masks.length ? masks.length - 1 : null;
+    const add = el('div', 'btnrow');
+    add.append(el('span', 'muted', '새 마스크'));
+    for (const [t, sh] of Object.entries(SHAPES)) add.append(btn(sh.name, () => {
+      if (masks.length >= MAX_MASKS) { toast(`마스크는 ${MAX_MASKS}개까지`); return; }
+      masks.push(newMask(t, masks.length + 1));
+      app.maskSel = masks.length - 1; app.maskComp = 0;
+      nextLabel('마스크 ' + sh.name + ' 추가');
+      changed(); render(); showSel();
+    }));
+    root.append(add);
+    masks.forEach((m, i) => {
+      const row = el('div', 'mrow' + (i === app.maskSel ? ' on' : ''));
+      const nb = el('button', 'pname', m.name); nb.type = 'button';
+      nb.onclick = () => { app.maskSel = i; app.maskComp = 0; render(); showSel(); };
+      const vis = btn(m.visible ? '보임' : '숨김', () => { m.visible = !m.visible; changed(); render(); showSel(); }, 'mini');
+      const del = btn('지우기', () => { masks.splice(i, 1); nextLabel('마스크 지우기'); app.maskSel = masks.length ? Math.min(i, masks.length - 1) : null; changed(); render(); showSel(); }, 'mini');
+      row.append(nb, vis, del);
+      root.append(row);
+    });
+    const m = curMask();
+    if (!m) { root.append(el('div', 'hint', '선형·원형·브러시는 사진 위에서 끌어 만들고, 밝기·색 범위는 아래 값으로 정함. 마스크는 최대 4개, 마스크마다 성분 4개')); return; }
+    // 마스크 전체
+    const opts = el('div', 'btnrow');
+    const show = el('label', 'chk'), showIn = el('input'); showIn.type = 'checkbox'; showIn.checked = !!app.showMaskOn;
+    showIn.onchange = () => { app.showMaskOn = showIn.checked; showSel(); };
+    show.append(showIn, el('span', null, '마스크 보기 (빨갛게)'));
+    const inv = el('label', 'chk'), invIn = el('input'); invIn.type = 'checkbox'; invIn.checked = m.invert;
+    invIn.onchange = () => { m.invert = invIn.checked; changed(); };
+    inv.append(invIn, el('span', null, '마스크 반전'));
+    opts.append(show, inv);
+    root.append(opts);
+    // 성분
+    root.append(el('div', 'subhead', '성분'));
+    m.comps.forEach((c, k) => {
+      const row = el('div', 'mrow' + (k === (app.maskComp || 0) ? ' on' : ''));
+      const nb = el('button', 'pname', SHAPES[c.shape.type].name); nb.type = 'button';
+      nb.onclick = () => { app.maskComp = k; render(); };
+      const op = el('select');
+      for (const [v, t] of OPS) { const o = el('option', null, t); o.value = v; op.append(o); }
+      op.value = c.op; op.disabled = k === 0;
+      op.onchange = () => { c.op = op.value; changed(); };
+      const ci = el('label', 'chk'), cin = el('input'); cin.type = 'checkbox'; cin.checked = c.invert;
+      cin.onchange = () => { c.invert = cin.checked; changed(); };
+      ci.append(cin, el('span', null, '반전'));
+      row.append(nb, op, ci);
+      if (m.comps.length > 1) row.append(btn('×', () => { m.comps.splice(k, 1); app.maskComp = 0; changed(); render(); }, 'mini'));
+      root.append(row);
+    });
+    if (m.comps.length < MAX_COMPS) {
+      const ar = el('div', 'btnrow'), ts = el('select');
+      for (const [t, sh] of Object.entries(SHAPES)) { const o = el('option', null, sh.name); o.value = t; ts.append(o); }
+      ar.append(ts);
+      for (const [op, t] of [['add', '+ 더하기'], ['subtract', '− 빼기'], ['intersect', '∩ 교차']]) ar.append(btn(t, () => {
+        m.comps.push({ op, invert: false, shape: newShape(ts.value) });
+        app.maskComp = m.comps.length - 1;
+        changed(); render();
+      }));
+      root.append(ar);
+    }
+    // 고른 성분의 값
+    const c = curComp(), s = c.shape;
+    if (s.type === 'linear') root.append(el('div', 'hint', '사진 위에서 끌기: 누른 곳이 100 %, 뗀 곳이 0 %'));
+    if (s.type === 'radial') {
+      root.append(el('div', 'hint', '사진 위에서 가운데를 누르고 끌어 크기를 정함'),
+        mini('가로 크기', () => s.rx, (v) => { s.rx = v; }, 0.01, 1, 0.005), mini('세로 크기', () => s.ry, (v) => { s.ry = v; }, 0.01, 1, 0.005),
+        mini('각도', () => s.angle, (v) => { s.angle = v; }, -90, 90, 1, (v) => Math.round(v) + '°'), mini('깃털 Feather', () => s.feather, (v) => { s.feather = v; }, 0, 100));
+    }
+    if (s.type === 'brush') {
+      const er = el('label', 'chk'), ei = el('input'); ei.type = 'checkbox'; ei.checked = BRUSH.erase;
+      ei.onchange = () => { BRUSH.erase = ei.checked; };
+      er.append(ei, el('span', null, '지우개'));
+      const br = el('div', 'btnrow');
+      br.append(er, btn('획 모두 지우기', () => { s.strokes = []; changed(); }, 'mini'));
+      root.append(el('div', 'hint', '사진 위를 문질러 칠함'),
+        mini('크기', () => BRUSH.size, (v) => { BRUSH.size = v; }, 0.005, 0.25, 0.005), mini('깃털 Feather', () => BRUSH.feather, (v) => { BRUSH.feather = v; }, 0, 100),
+        mini('흐름 Flow', () => BRUSH.flow, (v) => { BRUSH.flow = v; }, 1, 100), br);
+    }
+    if (s.type === 'luminance') {
+      root.append(el('div', 'hint', '화면 밝기 0(검정)–1(흰색) 중 고른 범위'),
+        mini('아래 끝', () => s.lo, (v) => { s.lo = v; }, 0, 1, 0.01), mini('위 끝', () => s.hi, (v) => { s.hi = v; }, 0, 1, 0.01),
+        mini('아래 부드럽게', () => s.loFeather, (v) => { s.loFeather = v; }, 0, 0.5, 0.01), mini('위 부드럽게', () => s.hiFeather, (v) => { s.hiFeather = v; }, 0, 0.5, 0.01));
+    }
+    if (s.type === 'color') {
+      const pr = el('div', 'btnrow'), sw = el('span', 'swatch');
+      if (s.swatch) sw.style.background = s.swatch;
+      pr.append(btn('색 고르기', () => startPick('maskColor'), 'primary'), sw, el('span', 'muted', s.sample ? '고름' : '아직 안 고름'));
+      root.append(pr, mini('범위 Refine', () => s.refine, (v) => { s.refine = v; }, 0, 100));
+    }
+    // 보정
+    root.append(el('div', 'subhead', '이 마스크의 보정 (전역 값에 더해짐)'));
+    for (const [k, label, min, max, step] of ADJUST) root.append(mini(label, () => m.adjust[k], (v) => { m.adjust[k] = v; }, min, max, step));
+    root.append(mini('양 Amount', () => m.amount, (v) => { m.amount = v; }, 0, 100, 1, (v) => Math.round(v) + ' %'));
+  };
+  app.renderMasks = render;
+  // 다른 사진·되돌리기로 마스크가 바뀌면 다시 그림
+  let lastKey = '';
+  app.syncers.push(() => {
+    const key = (app.cur ? app.cur.id : '') + JSON.stringify(app.cur ? app.cur.settings.masks : null) + app.maskSel;
+    if (key !== lastKey) { lastKey = key; render(); showSel(); }
+  });
+  render();
+  return root;
+}
+
+/** 고른 마스크를 빨갛게 보일지 */
+function showSel() {
+  app.pipe.showMask = app.showMaskOn && curMask() ? app.cur.settings.masks.filter((m) => m.visible && m.comps.length).indexOf(curMask()) : -1;
+  scheduleRender();
+}
+
+/** 사진 위에서 선형·원형·브러시 성분 만들기 */
+function setupMaskEditing() {
+  const cv = $('#gl');
+  let drag = null;
+  cv.addEventListener('pointerdown', (e) => {
+    const s = editShape();
+    if (!s || app.picking || app.cropping || !app.frame) return;
+    e.preventDefault(); e.stopPropagation();
+    cv.setPointerCapture(e.pointerId);
+    const p = srcAt(e);
+    drag = { s, p0: p };
+    if (s.type === 'linear') { s.a = p; s.b = p; }
+    else if (s.type === 'radial') { s.c = p; }
+    else if (s.type === 'brush') { drag.stroke = { pts: [p], size: BRUSH.size, feather: BRUSH.feather, flow: BRUSH.flow, erase: BRUSH.erase }; s.strokes.push(drag.stroke); }
+    app.pipe.showMask = Math.max(app.pipe.showMask, app.cur.settings.masks.filter((m) => m.visible && m.comps.length).indexOf(curMask()));
+    scheduleRender();
+  });
+  cv.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const p = srcAt(e), s = drag.s, A = app.frame.aspect;
+    if (s.type === 'linear') s.b = p;
+    else if (s.type === 'radial') {
+      const d = Math.hypot((p[0] - s.c[0]) * A[0], (p[1] - s.c[1]) * A[1]), k = s.ry / Math.max(s.rx, 1e-6);
+      s.rx = Math.max(0.01, d); s.ry = Math.max(0.01, d * k);
+    } else if (s.type === 'brush') {
+      const q = drag.stroke.pts[drag.stroke.pts.length - 1];
+      if (Math.hypot((p[0] - q[0]) * A[0], (p[1] - q[1]) * A[1]) > drag.stroke.size * 0.15) drag.stroke.pts.push(p);
+    }
+    scheduleRender();
+  });
+  const end = () => {
+    if (!drag) return;
+    drag = null;
+    showSel();
+    changed();
+    app.renderMasks?.();
+  };
+  cv.addEventListener('pointerup', end);
+  cv.addEventListener('pointercancel', end);
+}
+
 function startPick(kind) {
   if (!app.cur) return;
   app.picking = kind;
   document.body.classList.add('picking');
-  toast(kind === 'wb' ? '사진에서 흰색·회색이어야 할 곳을 누르세요' : '사진에서 바꿀 색을 누르세요');
+  toast(kind === 'wb' ? '사진에서 흰색·회색이어야 할 곳을 누르세요' : kind === 'maskColor' ? '사진에서 고를 색을 누르세요' : '사진에서 바꿀 색을 누르세요');
 }
 
-function sampleAt(e) {
-  const cv = $('#gl'), r = cv.getBoundingClientRect(), p = app.preview;
+/**
+ * 마스크 색 범위가 비교하는 색과 같은 기준의 그림: 전역 노출·화이트밸런스·카메라 룩만 입힘 (셰이더 maskAlphas의 p0)
+ */
+function maskBasis() {
+  const e = effective(app.cur.settings), st = defaults();
+  st.autoExposure = false;
+  st.light.exposure = e.light.exposure + (e.autoExposure ? app.cur.autoEV : 0);
+  st.color.temp = e.color.temp; st.color.tint = e.color.tint;
+  const keep = app.pipe.look;
+  app.pipe.setLook(app.cur.look || null);
+  try { return app.pipe.renderMany(app.preview, app.preview.width, app.preview.height, [st], 0)[0]; } finally { app.pipe.setLook(keep); }
+}
+
+function sampleAt(e, basis) {
+  const cv = $('#gl'), r = cv.getBoundingClientRect();
+  const p = basis || (app.cur.look ? shown(app.preview, app.cur.look, app.preview.width) : app.preview);
   const x = Math.round((e.clientX - r.left) / r.width * p.width), y = Math.round((e.clientY - r.top) / r.height * p.height);
   const d = p.getContext('2d').getImageData(Math.max(0, x - 2), Math.max(0, y - 2), 5, 5).data;
   let R = 0, G = 0, B = 0, n = 0;
@@ -1055,7 +1388,18 @@ function applyPick(e) {
   const kind = app.picking;
   app.picking = null;
   document.body.classList.remove('picking');
-  const [r, g, b] = sampleAt(e), st = app.cur.settings;
+  const [r, g, b] = sampleAt(e, kind === 'maskColor' ? maskBasis() : null), st = app.cur.settings;
+  if (kind === 'maskColor') {
+    const c = curComp();
+    if (c && c.shape.type === 'color') {
+      c.shape.sample = oklab([r, g, b]);
+      c.shape.swatch = `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+      nextLabel('마스크 색 고르기');
+    }
+    changed();
+    app.renderMasks?.();
+    return;
+  }
   if (kind === 'wb') {
     const lin = (v) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
     const R = lin(r), G = lin(g), B = lin(b);
@@ -1086,7 +1430,7 @@ function setupViewer() {
   });
   v.addEventListener('pointerup', (e) => {
     clearTimeout(lp);
-    if (app.cropping) return;
+    if (app.cropping || editShape()) return;
     const dx = e.clientX - x0, dy = e.clientY - y0;
     if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) && app.cur) {   // 좌우로 넘기기
       const i = app.photos.findIndex((p) => p.id === app.cur.id), j = i + (dx < 0 ? 1 : -1);
@@ -1100,6 +1444,7 @@ function setupViewer() {
   });
   v.addEventListener('pointercancel', () => clearTimeout(lp));
 
+  setupMaskEditing();
   app.cropBox = new CropBox(v, cv, (crop) => {
     app.cur.settings.geometry.crop = crop;
     clearTimeout(saveTimer);

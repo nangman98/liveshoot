@@ -1,4 +1,5 @@
 import { effective } from './profiles.js';
+import { packMasks, rasterBrush } from './masks.js';
 import { toneLUT, TO_PROPHOTO, FROM_PROPHOTO, REC2020_SRGB, LUT_N as LUT_W } from './camera.js';
 
 // WebGL2 보정 엔진. 늘 원본(미리보기 크기)에서 처음부터 다시 그린다.
@@ -57,7 +58,7 @@ uniform float uTemp, uTint, uVibrance, uSaturation, uRefineSat;
 uniform vec3 uMix[8];
 uniform float uBWMix[8];
 uniform float uBW;
-uniform vec4 uRegion;     // highlights, lights, darks, shadows
+uniform sampler2D uRegion;  // 구간 커브 256×1 (밝기 → 밝기, 단조)
 uniform vec4 uPoint;      // hue, range, -, active
 uniform vec3 uPointAdj;   // hue, sat, lum
 uniform vec3 uGradeS, uGradeM, uGradeH, uGradeG;  // hue, sat, lum
@@ -75,6 +76,14 @@ uniform mat3 uCamM, uToPP, uFromPP, uTo709;   // 카메라 RGB → 선형 Rec.20
 uniform sampler2D uTone, uHsv;                // 톤 표 4096×1 (EV −14…10), hue/sat 표 (색상×채도)×밝기
 uniform vec3 uHsvDim;
 uniform float uChroma[8];
+// 마스크 (masks.js packMasks): 성분 16개 = 마스크 4 × 성분 4
+uniform float uMaskN, uShowMask;
+uniform vec4 uCT[16], uCP[16], uCQ[16];   // (모양, 합치기, 반전, 마스크) | 모양 값
+uniform vec4 uMAmt, uMInv;
+uniform vec4 uMA[14];                     // 보정 14가지 × 마스크 4
+uniform vec3 uMRow0, uMRow1;              // 화면(0–1, 아래로) → 원본 uv
+uniform vec2 uMAspect;                    // 원본 가로·세로 / 긴 변
+uniform sampler2D uBrush;                 // 브러시: 마스크 i는 채널 i
 
 float luma(vec3 c){ return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 vec3 toLin(vec3 c){ return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
@@ -91,7 +100,6 @@ vec3 hsv2rgb(vec3 c){
   return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
 }
 float hueDist(float a, float b){ float d = abs(a - b); return min(d, 1.0 - d); }
-float bump(float x, float c){ float t = (x - c) / 0.16; return exp(-t * t); }
 float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float vnoise(vec2 p){
   vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
@@ -170,6 +178,52 @@ vec3 camLook(vec3 cam){   // 카메라 RGB(선형) → 선형 sRGB
   return uTo709 * (o + (s * o / y - o) * k);
 }
 
+vec3 oklabOf(vec3 lin){
+  vec3 lms = vec3(dot(lin, vec3(0.4122214708, 0.5363325363, 0.0514459929)), dot(lin, vec3(0.2119034982, 0.6806995451, 0.1073969566)), dot(lin, vec3(0.0883024619, 0.2817188376, 0.6299787005)));
+  lms = sign(lms) * pow(abs(lms), vec3(1.0 / 3.0));
+  return vec3(dot(lms, vec3(0.2104542553, 0.7936177850, -0.0040720468)), dot(lms, vec3(1.9779984951, -2.4285922050, 0.4505937099)), dot(lms, vec3(0.0259040371, 0.7827717662, -0.8086757660)));
+}
+float shapeAlpha(vec4 T, vec4 P, vec4 Q, vec2 src, vec2 lp, vec3 p0, vec3 lab){
+  int t = int(T.x + 0.5);
+  if (t == 1) { vec2 a = P.xy, d = P.zw - P.xy; return 1.0 - smoothstep(0.0, 1.0, dot(lp - a, d) / max(dot(d, d), 1e-12)); }
+  if (t == 2) {
+    vec2 d = lp - P.xy; float sn = sin(-Q.x), cs = cos(-Q.x);
+    vec2 q = vec2(d.x * cs - d.y * sn, d.x * sn + d.y * cs) / max(P.zw, vec2(1e-6));
+    return 1.0 - smoothstep(1.0 - max(Q.y, 0.01), 1.0, length(q));
+  }
+  if (t == 3) { float y = clamp(luma(p0), 0.0, 1.0); return smoothstep(P.x - P.z, P.x, y) * (1.0 - smoothstep(P.y, P.y + P.w, y)); }
+  if (t == 4) { vec3 d = lab - P.xyz; return 1.0 - smoothstep(P.w * 0.5, P.w, sqrt(d.y * d.y + d.z * d.z + 0.25 * d.x * d.x)); }
+  if (t == 5) { vec4 b = texture(uBrush, src); int ch = int(T.w + 0.5); return ch == 0 ? b.r : ch == 1 ? b.g : ch == 2 ? b.b : b.a; }
+  return 0.0;
+}
+/** 마스크 4개의 알파 (p0: 전역 노출만 입힌 화면 색, 밝기·색 범위 기준) */
+vec4 maskAlphas(vec3 p0){
+  vec2 o2 = vec2(uv.x, 1.0 - uv.y);
+  vec2 src = vec2(dot(uMRow0, vec3(o2, 1.0)), dot(uMRow1, vec3(o2, 1.0)));
+  vec2 lp = src * uMAspect;
+  vec3 lab = oklabOf(toLin(clamp(p0, 0.0, 1.0)));
+  float al[4] = float[4](0.0, 0.0, 0.0, 0.0);
+  for (int mi = 0; mi < 4; mi++) {
+    if (float(mi) >= uMaskN) break;
+    float a = 0.0; bool first = true;
+    for (int k = 0; k < 4; k++) {
+      int i = mi * 4 + k;
+      vec4 T = uCT[i];
+      if (T.x < 0.5) continue;
+      float cv = shapeAlpha(T, uCP[i], uCQ[i], src, lp, p0, lab);
+      if (T.z > 0.5) cv = 1.0 - cv;
+      int op = int(T.y + 0.5);
+      if (first && op != 2) { a = cv; first = false; continue; }
+      a = op == 0 ? max(a, cv) : op == 1 ? a * (1.0 - cv) : a * cv;
+      first = false;
+    }
+    al[mi] = a;
+  }
+  vec4 a4 = vec4(al[0], al[1], al[2], al[3]);
+  a4 = mix(a4, 1.0 - a4, uMInv);
+  return a4 * uMAmt;
+}
+
 vec3 gradeTint(vec3 g){ vec3 c = hsv2rgb(vec3(g.x, 1.0, 1.0)); return (c - luma(c)) * g.y * 0.3; }
 
 const float CEN[8] = float[8](0.0, 0.0833, 0.1667, 0.3333, 0.5, 0.6667, 0.75, 0.8333);
@@ -179,6 +233,27 @@ void main(){
   vec3 c = texture(uSrc, uv).rgb;
   // 원본 보기: 사용자 보정만 빼고, RAW 카메라 룩(시작 색감)은 그대로
   if (uOriginal > 0.5) { o = vec4(uCam > 0.5 ? clamp(toSrgb(camLook(toLin(clamp(c, 0.0, 1.0)))), 0.0, 1.0) : c, 1.0); return; }
+  // 마스크: 전역 노출만 입힌 색으로 알파를 정하고, 슬라이더 값 = 전역 + Σ 알파 × 마스크 값
+  vec4 ma = vec4(0.0);
+  if (uMaskN > 0.5) {
+    vec3 q = toLin(clamp(c, 0.0, 1.0)) * exp2(uExposure) * vec3(1.0 + 0.3 * uTemp, 1.0 - 0.25 * uTint, 1.0 - 0.3 * uTemp);
+    if (uCam > 0.5) q = camLook(q);
+    ma = maskAlphas(toSrgb(q));
+  }
+  float kExposure = uExposure + dot(ma, uMA[0]);
+  float kContrast = clamp(uContrast + dot(ma, uMA[1]) / 100.0, -1.0, 1.0);
+  float kHighlights = clamp(uHighlights + dot(ma, uMA[2]) / 100.0, -1.0, 1.0);
+  float kShadows = clamp(uShadows + dot(ma, uMA[3]) / 100.0, -1.0, 1.0);
+  float kWhites = clamp(uWhites + dot(ma, uMA[4]) / 100.0, -1.0, 1.0);
+  float kBlacks = clamp(uBlacks + dot(ma, uMA[5]) / 100.0, -1.0, 1.0);
+  float kTemp = clamp(uTemp + dot(ma, uMA[6]) / 100.0, -1.0, 1.0);
+  float kTint = clamp(uTint + dot(ma, uMA[7]) / 100.0, -1.0, 1.0);
+  float kSaturation = clamp(uSaturation + dot(ma, uMA[8]) / 100.0, -1.0, 1.0);
+  float kTexture = clamp(uTexture + dot(ma, uMA[9]) / 100.0, -1.0, 1.0);
+  float kClarity = clamp(uClarity + dot(ma, uMA[10]) / 100.0, -1.0, 1.0);
+  float kDehaze = clamp(uDehaze + dot(ma, uMA[11]) / 100.0, -1.0, 1.0);
+  float kSharp = clamp(uSharp.x + dot(ma, uMA[12]) / 100.0, 0.0, 1.5);
+  float kNR = clamp(uNR.x + dot(ma, uMA[13]) / 100.0, 0.0, 1.0);
   vec4 l4 = texture(uL, uv);
   vec3 s = texture(uS, uv).rgb, m = texture(uM, uv).rgb, l = l4.rgb;
   // 국소 분산이 큰 곳(보케·밝은 가장자리)은 넓은 주변 대신 좁은 주변을 기준으로 (헤일로 폭을 M 반경으로 줄임)
@@ -186,9 +261,9 @@ void main(){
   ga = ga / (ga + 0.015);
 
   // Detail: 밝기 노이즈 → 색 노이즈 → 샤픈 → Texture
-  if (uNR.x > 0.0) {
+  if (kNR > 0.0) {
     float e = abs(luma(c) - luma(m));
-    float w = uNR.x * (1.0 - smoothstep(0.0, mix(0.25, 0.02, uNR.y), e));
+    float w = kNR * (1.0 - smoothstep(0.0, mix(0.25, 0.02, uNR.y), e));
     vec3 base = mix(c, m, w);
     c = base + (c - base) * uNR.z;
   }
@@ -199,17 +274,17 @@ void main(){
     float w = uCNR.x * (1.0 - smoothstep(0.0, mix(0.4, 0.05, uCNR.y), length(ch - rc)));
     c = Y + mix(ch, rc, w);
   }
-  if (uSharp.x > 0.0) {
+  if (kSharp > 0.0) {
     vec3 d = clamp(c - s, -mix(0.03, 0.3, uSharp.y), mix(0.03, 0.3, uSharp.y));
     float edge = abs(luma(s) - luma(m)) * 8.0;
     float mask = uSharp.z <= 0.0 ? 1.0 : smoothstep(uSharp.z * 0.6, uSharp.z * 0.6 + 0.15, edge);
-    c += d * uSharp.x * 2.0 * mask;
+    c += d * kSharp * 2.0 * mask;
   }
-  if (uTexture != 0.0) c += (s - m) * uTexture * 1.5;
+  if (kTexture != 0.0) c += (s - m) * kTexture * 1.5;
 
   // 노출·화이트밸런스는 선형에서
-  vec3 wb = vec3(1.0 + 0.3 * uTemp, 1.0 - 0.25 * uTint, 1.0 - 0.3 * uTemp);
-  float gain = exp2(uExposure);
+  vec3 wb = vec3(1.0 + 0.3 * kTemp, 1.0 - 0.25 * kTint, 1.0 - 0.3 * kTemp);
+  float gain = exp2(kExposure);
   vec3 lc0 = toLin(clamp(c, 0.0, 1.0)) * gain * wb, ll0 = toLin(l) * gain * wb, lm0 = toLin(m) * gain * wb;
   // RAW: 카메라 JPEG 룩 (장면 선형 카메라 RGB → 화면). 노출·화이트밸런스는 그 앞, 장면 값에서
   if (uCam > 0.5) { lc0 = camLook(lc0); ll0 = camLook(ll0); lm0 = camLook(lm0); }
@@ -224,16 +299,16 @@ void main(){
   }
 
   // Dehaze: 안개 모델 I = J·t + A·(1 − t), 주변의 가장 어두운 채널로 t를 어림 (dark channel prior)
-  if (uDehaze > 0.0) {
+  if (kDehaze > 0.0) {
     const float A = 0.98;
-    float t = max(1.0 - uDehaze * 0.9 * min(min(pl.r, pl.g), pl.b) / A, 0.2);
+    float t = max(1.0 - kDehaze * 0.9 * min(min(pl.r, pl.g), pl.b) / A, 0.2);
     p = max((p - A) / t + A, 0.0);
     pl = max((pl - A) / t + A, 0.0);
     pm = max((pm - A) / t + A, 0.0);
-  } else if (uDehaze < 0.0) {
-    p = mix(p, vec3(0.8), -uDehaze * 0.5);
-    pl = mix(pl, vec3(0.8), -uDehaze * 0.5);
-    pm = mix(pm, vec3(0.8), -uDehaze * 0.5);
+  } else if (kDehaze < 0.0) {
+    p = mix(p, vec3(0.8), -kDehaze * 0.5);
+    pl = mix(pl, vec3(0.8), -kDehaze * 0.5);
+    pm = mix(pm, vec3(0.8), -kDehaze * 0.5);
   }
 
   // 밝기 톤: Clarity → 하이라이트·섀도 → Whites·Blacks → 대비
@@ -242,17 +317,18 @@ void main(){
   float Lb = mix(Ll, luma(pm), ga);   // 넓은 주변 밝기, 밝은 가장자리 근처는 좁은 주변으로
   // 다항식 가중치는 0–1로 자른 밝기로 (노출로 1을 넘은 밝은 곳에서 음수가 되어 검게 뚫리지 않게)
   float Lc = clamp(L, 0.0, 1.0);
-  L += uClarity * clamp(L - Lb, -0.2, 0.2) * 1.0 * (4.0 * Lc * (1.0 - Lc));
+  L += kClarity * clamp(L - Lb, -0.2, 0.2) * 1.0 * (4.0 * Lc * (1.0 - Lc));
   float hm = smoothstep(0.45, 1.0, Lb), sm = 1.0 - smoothstep(0.0, 0.55, Lb);
-  L += uHighlights * 0.35 * hm * (uHighlights < 0.0 ? L : max(1.0 - L, 0.0));
-  L += uShadows * 0.45 * sm * (uShadows > 0.0 ? max(1.0 - L, 0.0) * smoothstep(0.0, 0.25, L) : L);
-  L += uWhites * 0.25 * smoothstep(0.5, 1.0, L);
-  L += uBlacks * 0.2 * (1.0 - smoothstep(0.0, 0.4, L)) * (uBlacks > 0.0 ? smoothstep(0.0, 0.1, L) : 1.0);
+  L += kHighlights * 0.35 * hm * (kHighlights < 0.0 ? L : max(1.0 - L, 0.0));
+  L += kShadows * 0.45 * sm * (kShadows > 0.0 ? max(1.0 - L, 0.0) * smoothstep(0.0, 0.25, L) : L);
+  L += kWhites * 0.25 * smoothstep(0.5, 1.0, L);
+  L += kBlacks * 0.2 * (1.0 - smoothstep(0.0, 0.4, L)) * (kBlacks > 0.0 ? smoothstep(0.0, 0.1, L) : 1.0);
   // 대비: L + k(L − ½)L(1 − L). k > 0은 smoothstep과 같고, k < 0은 중간 기울기를 낮추되 끝점은 고정
   Lc = clamp(L, 0.0, 1.0);
-  L += (uContrast > 0.0 ? 2.0 : 2.4) * uContrast * (Lc - 0.5) * Lc * (1.0 - Lc);
+  L += (kContrast > 0.0 ? 2.0 : 2.4) * kContrast * (Lc - 0.5) * Lc * (1.0 - Lc);
   // 구간 커브 (Lightroom의 parametric curve: 하이라이트·밝은 톤·어두운 톤·섀도)
-  L += 0.25 * (uRegion.x * bump(L, 0.875) + uRegion.y * bump(L, 0.625) + uRegion.z * bump(L, 0.375) + uRegion.w * bump(L, 0.125));
+  // 0–1만 커브, 1 넘는 밝기는 그대로 (끝점 고정이라 1에서 이어짐)
+  if (L < 1.0) { float f = clamp(L, 0.0, 1.0) * 255.0; int i = min(int(f), 254); L = mix(texelFetch(uRegion, ivec2(i, 0), 0).r, texelFetch(uRegion, ivec2(i + 1, 0), 0).r, f - float(i)); }
   L = clamp(L, 0.0, 1.2);
   // 색은 밝기 비율만큼 늘리되, 어두운 화소를 밝힐 때는 √비율로 줄이고 3배까지만 (노이즈·파란 기운 방지)
   float r = L / L0;
@@ -292,7 +368,7 @@ void main(){
   // Vibrance (채도 낮은 색·피부색 보호) → Saturation
   float skin = 1.0 - smoothstep(0.0, 0.08, hueDist(h.x, 0.07));
   h.y = clamp(h.y * (1.0 + uVibrance * (1.0 - h.y) * (1.0 - 0.5 * skin)), 0.0, 1.0);
-  h.y = clamp(h.y * (1.0 + uSaturation), 0.0, 1.0);
+  h.y = clamp(h.y * (1.0 + kSaturation), 0.0, 1.0);
   p = hsv2rgb(h) * (1.0 + lumAdj * 0.5);
 
   // 흑백: 색마다 밝기를 B&W Mix만큼 바꿔 회색으로 (색이 진할수록 많이)
@@ -329,6 +405,8 @@ void main(){
     float n = mix(vnoise(g), hash(floor(g)), uGrain.z) - 0.5;
     p += n * uGrain.x * 0.25 * (1.0 - abs(2.0 * luma(p) - 1.0) * 0.6);
   }
+  // 마스크 보기: 고른 마스크를 빨갛게
+  if (uShowMask > -0.5) { float a = dot(ma, vec4(equal(vec4(0.0, 1.0, 2.0, 3.0), vec4(uShowMask)))); p = mix(p, vec3(1.0, 0.15, 0.15), 0.55 * a); }
   o = vec4(clamp(p, 0.0, 1.0), 1.0);
 }`;
 
@@ -408,6 +486,14 @@ export class Pipeline {
     this.luts = new Map();   // 가져온 3D LUT: id → { tex, input }
     this.dummy3 = this.tex3(1, new Uint8Array([0, 0, 0]));
     this.look = null;
+    this.frame = null;       // 마스크 좌표 (geometry.js maskFrame)
+    this.showMask = -1;      // 빨갛게 보일 마스크 번호
+    this.brushTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.brushTex);
+    for (const [p, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, p, v);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+    this._brushKey = '';
+    this.regTex = this.ftex(256, 1, gl.R32F, gl.RED, curveLUT([[0, 0], [1, 1]]));
     this.toneTex = this.ftex(LUT_W, 1, gl.R32F, gl.RED, null);
     this.hsvTex = this.ftex(1, 1, gl.RGB32F, gl.RGB, new Float32Array([0, 1, 1]));
     this.seed = Math.random() * 100;
@@ -592,6 +678,22 @@ export class Pipeline {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 1, gl.RGBA, gl.UNSIGNED_BYTE, data);
   }
 
+  /**
+   * 구간 커브 (Lightroom parametric curve처럼): 섀도·어두운 톤·밝은 톤·하이라이트 구간 가운데(0.125·0.375·0.625·0.875)의
+   * 점을 ±0.12까지 옮기고 단조 3차 보간으로 잇는다. 점 사이가 0.25라 곡선이 거꾸로 꺾이지 않는다
+   * (예전 가우시안 더하기는 −100에서 밝기가 뒤집혀 윤곽이 생겼다).
+   */
+  uploadRegion(r) {
+    const k = 0.12, key = [r.shadows, r.darks, r.lights, r.highlights].join();
+    if (key === this._regKey) return;
+    this._regKey = key;
+    const pts = [[0, 0], [0.125, 0.125 + k * r.shadows / 100], [0.375, 0.375 + k * r.darks / 100],
+      [0.625, 0.625 + k * r.lights / 100], [0.875, 0.875 + k * r.highlights / 100], [1, 1]];
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.regTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, 256, 1, 0, gl.RED, gl.FLOAT, curveLUT(pts));
+  }
+
   /** 설정을 셰이더에 넣고 out(없으면 화면 캔버스)에 그린다 */
   draw(user, autoEV, original, out) {
     const set = this.set, gl = this.gl;
@@ -599,11 +701,28 @@ export class Pipeline {
     const st = effective(user);   // 프로필을 사용자 슬라이더 아래에 깔기
     if (st.detail.sharpen.radius !== set.sharpRadius && set.source) this.build(set.source, set.w, set.h, st.detail.sharpen.radius);
     this.uploadLUT(st.curve, st._fade);
+    this.uploadRegion(st.curve.region);
     const L = st.light, C = st.color, E = st.effects, D = st.detail, G = st.grading, P = st.point;
     const g3 = (z) => [z.h / 360, z.s / 100, z.l / 100];
     const L3 = st._lut ? this.luts.get(st._lut.id) : null;
+    const F = this.frame, MK = F ? packMasks(st.masks, F.aspect) : null;
+    if (MK && MK.n && MK.brushKey !== this._brushKey) {   // 브러시 획이 바뀌었을 때만 다시 그림
+      this._brushKey = MK.brushKey;
+      const b = rasterBrush(MK.brushes, F.aspect);
+      gl.bindTexture(gl.TEXTURE_2D, this.brushTex);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, b.w, b.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, b.data);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    }
     this.pass(this.main, out, [['uSrc', set.src], ['uS', set.S.t], ['uM', set.M.t], ['uL', set.L.t], ['uLut', this.lut],
-      ['uLut3', L3 ? L3.tex : this.dummy3, gl.TEXTURE_3D], ['uTone', this.toneTex], ['uHsv', this.hsvTex]], (u) => {
+      ['uLut3', L3 ? L3.tex : this.dummy3, gl.TEXTURE_3D], ['uTone', this.toneTex], ['uHsv', this.hsvTex], ['uRegion', this.regTex], ['uBrush', this.brushTex]], (u) => {
+      gl.uniform1f(u.uMaskN, MK ? MK.n : 0);
+      gl.uniform1f(u.uShowMask, MK && MK.n && !out ? this.showMask : -1);   // 빨간 표시는 화면에만 (내보내기·썸네일 제외)
+      if (MK && MK.n) {
+        gl.uniform4fv(u.uCT, MK.ct); gl.uniform4fv(u.uCP, MK.cp); gl.uniform4fv(u.uCQ, MK.cq);
+        gl.uniform4fv(u.uMAmt, MK.amt); gl.uniform4fv(u.uMInv, MK.inv); gl.uniform4fv(u.uMA, MK.adj);
+        gl.uniform3fv(u.uMRow0, F.row0); gl.uniform3fv(u.uMRow1, F.row1); gl.uniform2fv(u.uMAspect, F.aspect);
+      }
       const K = this.look, m3 = (n, m) => u[n] && gl.uniformMatrix3fv(u[n], true, m.flat());
       gl.uniform1f(u.uCam, K ? 1 : 0);
       if (K) {
@@ -627,8 +746,6 @@ export class Pipeline {
       v3('uMix', st.mixer.flatMap((b) => [b.h / 100, b.s / 100, b.l / 100]));
       if (u.uBWMix) gl.uniform1fv(u.uBWMix, st.bw.map((v) => v / 100));
       f('uBW', st.treatment === 'bw' ? 1 : 0);
-      const R = st.curve.region;
-      gl.uniform4f(u.uRegion, R.highlights / 100, R.lights / 100, R.darks / 100, R.shadows / 100);
       gl.uniform4f(u.uPoint, P.hue / 360, P.range / 360, 0, P.active ? 1 : 0);
       v3('uPointAdj', [P.hueShift / 100, P.satShift / 100, P.lumShift / 100]);
       v3('uGradeS', g3(G.shadows)); v3('uGradeM', g3(G.midtones)); v3('uGradeH', g3(G.highlights)); v3('uGradeG', g3(G.global));
@@ -699,8 +816,9 @@ export class Pipeline {
   }
 
   /** 내보내기: source(w×h 캔버스)를 같은 설정으로 그려 2D 캔버스로 돌려준다. 미리보기 상태는 되살린다. */
-  renderFull(source, w, h, st, autoEV) {
-    const keep = this.set;
+  renderFull(source, w, h, st, autoEV, frame) {
+    const keep = this.set, keepFrame = this.frame;
+    if (frame) this.frame = frame;
     this.set = null;
     this.build(source, w, h, st.detail.sharpen.radius);
     const out = this.target(w, h);
@@ -711,6 +829,7 @@ export class Pipeline {
     gl.deleteTexture(out.t); gl.deleteFramebuffer(out.fb);
     this.free(this.set);
     this.set = keep;
+    this.frame = keepFrame;
     const c = document.createElement('canvas');
     c.width = w; c.height = h;
     const ctx = c.getContext('2d'), img = ctx.createImageData(w, h), row = w * 4;

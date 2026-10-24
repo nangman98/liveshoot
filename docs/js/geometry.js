@@ -59,6 +59,12 @@ export function renderGeometry(src, g, maxEdge, opts = {}) {
   return cv;
 }
 
+/** 마스크용: 결과의 정규화 좌표(0–1, 아래로) → 원본 uv. 크기와 상관없어 썸네일·내보내기에 그대로 쓴다 */
+export function maskFrame(sw, sh, plan) {
+  const { row0, row1 } = geomRows(sw, sh, plan), L = Math.max(sw, sh);
+  return { row0: [row0[0] * plan.w, row0[1] * plan.h, row0[2]], row1: [row1[0] * plan.w, row1[1] * plan.h, row1[2]], aspect: [sw / L, sh / L] };
+}
+
 /** 16비트 원본용: 결과 화소 → 원본 uv(0–1, 위쪽이 0)로 가는 두 줄 [a, b, c] (geomPlan의 역변환) */
 export function geomRows(sw, sh, plan) {
   const v = plan.m.inverse();

@@ -105,5 +105,8 @@ export function parseXMP(text) {
   if (vals.SplitToningShadowHue && !vals.ColorGradeBlending) st.grading.blending = 100;
   // 흰색 균형 값이 "As Shot"이 아닌 절대 K는 사진마다 의미가 달라 옮기지 않음
   if (vals.Temperature && !vals.IncrementalTemperature) skipped.push('Temperature(K)');
-  return { name: vals.Name || null, settings: st, used, skipped };
+  // 묶음 이름(crs:Group): rdf:Alt 안 글자라 따로 읽음
+  const grp = doc.getElementsByTagNameNS(CRS, 'Group')[0];
+  const group = (vals.Group || (grp && grp.textContent) || '').trim() || null;
+  return { name: vals.Name || null, group, settings: st, used, skipped };
 }

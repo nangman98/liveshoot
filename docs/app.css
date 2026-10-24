@@ -123,3 +123,25 @@ body.client .exit { display: block; }
   #panel { width: auto; flex: 1; border-left: none; border-top: 1px solid var(--line); }
   #top .chk span { display: none; }
 }
+
+/* 프로필 즐겨찾기 별, 빠른 메뉴 */
+.profwrap { position: relative; }
+.profwrap > .prof { width: 100%; }
+.profwrap > .star { position: absolute; top: 4px; right: 4px; background: none; border: none; padding: 0 4px; font-size: 16px; line-height: 1.2; color: rgba(255,255,255,0.75); text-shadow: 0 0 3px #000; cursor: pointer; }
+.profwrap > .star.on { color: #f5c542; }
+.profsel { width: 100%; margin: 4px 0 8px; }
+/* 프리셋 목록 */
+.prow { display: flex; align-items: center; gap: 6px; }
+.pname { flex: 1; text-align: left; background: none; border: none; color: var(--text); padding: 6px 4px 6px 16px; border-radius: 6px; cursor: pointer; }
+.pname:active, .pname:hover { background: #2a2a2f; }
+/* 히스토리 */
+.hlist { display: flex; flex-direction: column; max-height: 260px; overflow-y: auto; margin: 4px 0; }
+.hrow { text-align: left; background: none; border: none; color: var(--text); padding: 5px 8px; border-radius: 6px; cursor: pointer; }
+.hrow.on { background: #2f2f35; font-weight: 600; }
+.hrow.future { color: var(--muted); }
+
+/* 마스크 */
+.mrow { display: flex; align-items: center; gap: 6px; border-radius: 6px; }
+.mrow.on { background: #2a2a2f; }
+.mrow select { max-width: 92px; }
+.swatch { width: 22px; height: 22px; border-radius: 4px; border: 1px solid #555; background: #333; }

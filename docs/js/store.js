@@ -70,6 +70,7 @@ export const defaults = () => ({
     nr: { amount: 0, detail: 50, contrast: 0 },
     cnr: { amount: 0, detail: 50, smoothness: 50 },
   },
+  masks: [],   // 국소 보정 (masks.js)
 });
 
 /** 저장된 보정값에 새로 생긴 항목이 빠져 있으면 기본값으로 채운다 */

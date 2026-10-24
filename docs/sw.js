@@ -1,7 +1,7 @@
 // 오프라인 캐시. 고친 뒤 VERSION을 올리면 기기에서 다음에 열 때 새 판으로 바뀐다 (js/main.js의 VERSION과 같게).
-const VERSION = 'v12';
+const VERSION = 'v13';
 const CACHE = 'liveshoot-' + VERSION;
-const FILES = ['./', 'index.html', 'app.css', 'manifest.webmanifest', 'js/main.js', 'js/gl.js', 'js/store.js', 'js/curve.js', 'js/export.js', 'js/geometry.js', 'js/exif.js', 'js/raw.js', 'js/profiles.js', 'js/lut.js', 'js/xmp.js', 'js/camera.js', 'hdr-test.html',
+const FILES = ['./', 'index.html', 'app.css', 'manifest.webmanifest', 'js/main.js', 'js/gl.js', 'js/store.js', 'js/curve.js', 'js/export.js', 'js/geometry.js', 'js/exif.js', 'js/raw.js', 'js/profiles.js', 'js/lut.js', 'js/xmp.js', 'js/camera.js', 'js/presets.js', 'js/masks.js', 'hdr-test.html',
   ...['ILCA-99M2', 'ILCE-7CR', 'ILCE-7M4', 'NIKON_D5300', 'NIKON_Z_6_2', 'NIKON_Z_8', 'X-H2S', 'X-T4'].map((m) => `vendor/lightcraft/camera-profiles/${m}.json`),
   'vendor/libraw/index.js', 'vendor/libraw/worker.js', 'vendor/libraw/libraw.js', 'vendor/libraw/libraw.wasm',
   'icons/icon.svg', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
